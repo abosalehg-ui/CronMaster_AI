@@ -51,8 +51,8 @@ class Config:
     
     # إعدادات الإصلاح التلقائي
     AUTO_FIX_TIMEOUT = True  # زيادة timeout تلقائياً عند فشل timeout
-    TIMEOUT_INCREMENT = 60  # زيادة 60 ثانية
-    MAX_TIMEOUT = 300  # حد أقصى 5 دقائق
+    TIMEOUT_INCREMENT = 120  # زيادة 120 ثانية
+    MAX_TIMEOUT = 900  # حد أقصى 15 دقيقة
     AUTO_RETRY = True  # إعادة التشغيل تلقائياً بعد الإصلاح
     
     # Telegram
