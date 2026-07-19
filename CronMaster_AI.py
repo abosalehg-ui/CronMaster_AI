@@ -60,6 +60,11 @@ class Config:
     MAX_TIMEOUT = 900  # حد أقصى 15 دقيقة
     AUTO_RETRY = True  # إعادة التشغيل تلقائياً بعد الإصلاح
 
+    # إعادة المحاولة للأخطاء العابرة (network_error / api_error)
+    AUTO_RETRY_TRANSIENT = True  # إعادة تشغيل تلقائية مسقوفة للأخطاء العابرة
+    MAX_RETRIES = 3  # حد أقصى لعدد إعادات المحاولة قبل التصعيد للمستخدم
+    RETRY_BACKOFF_HOURS = 1  # لأخطاء الـ API (429): لا تُعاد المحاولة قبل مرور هذه المدة على آخر تشغيل
+
     # كشف المهام الصامتة: مهمة مفعّلة فات موعدها المجدول بأكثر من هذه المدة
     SILENT_GRACE_HOURS = 6
 
@@ -67,9 +72,17 @@ class Config:
     TELEGRAM_CHAT_ID = ""
 
     _INT_KEYS = frozenset(
-        {"ALERT_THRESHOLD", "ALERT_COOLDOWN_HOURS", "TIMEOUT_INCREMENT", "MAX_TIMEOUT", "SILENT_GRACE_HOURS"}
+        {
+            "ALERT_THRESHOLD",
+            "ALERT_COOLDOWN_HOURS",
+            "TIMEOUT_INCREMENT",
+            "MAX_TIMEOUT",
+            "MAX_RETRIES",
+            "RETRY_BACKOFF_HOURS",
+            "SILENT_GRACE_HOURS",
+        }
     )
-    _BOOL_KEYS = frozenset({"AUTO_FIX_TIMEOUT", "AUTO_RETRY"})
+    _BOOL_KEYS = frozenset({"AUTO_FIX_TIMEOUT", "AUTO_RETRY", "AUTO_RETRY_TRANSIENT"})
     _STR_KEYS = frozenset({"TELEGRAM_CHAT_ID"})
 
     @classmethod
@@ -230,13 +243,15 @@ ERROR_DATABASE = [
         pattern=r"rate.?limit|\b429\b|too many requests",
         error_type=ErrorType.API_ERROR,
         description_ar="تجاوز حد الطلبات (Rate Limit)",
-        suggested_fix="انتظر قبل المحاولة مجدداً",
+        suggested_fix="إعادة المحاولة تلقائياً بعد فترة تهدئة",
+        auto_fixable=True,
     ),
     ErrorSignature(
         pattern=r"Connection refused|Connection timed out|ETIMEDOUT|Network unreachable|DNS|ENETUNREACH|getaddrinfo",
         error_type=ErrorType.NETWORK_ERROR,
         description_ar="مشكلة في الاتصال بالشبكة",
-        suggested_fix="تحقق من الاتصال بالإنترنت",
+        suggested_fix="إعادة المحاولة تلقائياً (خطأ عابر غالباً)",
+        auto_fixable=True,
     ),
     ErrorSignature(
         pattern=r"timeout|timed out|deadline exceeded",
@@ -714,7 +729,7 @@ class ReportGenerator:
 class StateManager:
     """إدارة حالة المراقبة: سجل الإصلاحات، تهدئة التنبيهات، تتبع التعافي"""
 
-    _DEFAULT_STATE = {"fixes_applied": [], "alerts": {}, "failing_jobs": [], "last_run": None}
+    _DEFAULT_STATE = {"fixes_applied": [], "alerts": {}, "failing_jobs": [], "retries": {}, "last_run": None}
 
     def __init__(self, state_file: Optional[Path] = None):
         self.logger = logging.getLogger(__name__)
@@ -727,6 +742,7 @@ class StateManager:
         state["fixes_applied"] = []
         state["alerts"] = {}
         state["failing_jobs"] = []
+        state["retries"] = {}
         if self.state_file.exists():
             try:
                 loaded = json.loads(self.state_file.read_text(encoding="utf-8"))
@@ -789,6 +805,28 @@ class StateManager:
         for key in [k for k in alerts if k.startswith(f"{job_id}/")]:
             del alerts[key]
 
+    # ---- عدّاد إعادة المحاولة للأخطاء العابرة ----
+
+    def get_retry_count(self, job_id: str) -> int:
+        """كم مرة أُعيدت محاولة هذه المهمة تلقائياً منذ آخر نجاح"""
+        return self.state.get("retries", {}).get(job_id, 0)
+
+    def record_retry(self, job_id: str):
+        """تسجيل إعادة محاولة (رفع العدّاد بواحد)"""
+        retries = self.state.setdefault("retries", {})
+        retries[job_id] = retries.get(job_id, 0) + 1
+
+    def clear_retries_for(self, job_id: str):
+        """تصفير عدّاد المحاولات (عند التعافي أو عند توقف المهمة عن الفشل)"""
+        self.state.get("retries", {}).pop(job_id, None)
+
+    def prune_retries(self, active_ids: List[str]):
+        """إبقاء عدّادات المهام الفاشلة حالياً فقط — تنظيف بقايا مهام تعافت أو عُطّلت"""
+        retries = self.state.get("retries", {})
+        active = set(active_ids)
+        for job_id in [k for k in retries if k not in active]:
+            del retries[job_id]
+
     # ---- تتبع التعافي ----
 
     def get_failing(self) -> List[str]:
@@ -802,6 +840,7 @@ class StateManager:
         return {
             "fixes": self.state.get("fixes_applied", [])[-limit:],
             "alerts": self.state.get("alerts", {}),
+            "retries": self.state.get("retries", {}),
             "last_run": self.state.get("last_run"),
         }
 
@@ -824,6 +863,101 @@ class CronMaster:
         self.reporter = ReportGenerator()
         self.state = StateManager()
         self.logger = logging.getLogger(__name__)
+
+    # ------------------------------------------------------------
+    # الإصلاح التلقائي (منطق موحّد يستخدمه monitor و fix)
+    # ------------------------------------------------------------
+
+    def _apply_auto_fix(
+        self,
+        job: OpenClawJob,
+        analysis: FailureAnalysis,
+        retry: bool = True,
+        dry_run: bool = False,
+    ) -> Tuple[int, int]:
+        """يطبّق الإصلاح التلقائي المناسب حسب نوع الخطأ.
+
+        - TIMEOUT: زيادة المهلة (مع نسخة احتياطية) ثم إعادة تشغيل اختيارية.
+        - NETWORK_ERROR / API_ERROR: إعادة محاولة مسقوفة بـ MAX_RETRIES؛
+          أخطاء الـ API تحترم فترة تهدئة منسوبة لآخر تشغيل فعلي.
+
+        يُحدّث ``analysis`` في مكانه ويعيد (عدد الإصلاحات، عدد إعادات التشغيل).
+        """
+        et = analysis.error_type
+
+        if et == ErrorType.TIMEOUT and Config.AUTO_FIX_TIMEOUT:
+            return self._fix_timeout_flow(job, analysis, retry, dry_run)
+
+        if et in (ErrorType.NETWORK_ERROR, ErrorType.API_ERROR) and Config.AUTO_RETRY_TRANSIENT:
+            return self._retry_transient_flow(job, analysis, dry_run)
+
+        return 0, 0
+
+    def _fix_timeout_flow(
+        self, job: OpenClawJob, analysis: FailureAnalysis, retry: bool, dry_run: bool
+    ) -> Tuple[int, int]:
+        """إصلاح خطأ المهلة بزيادتها ثم إعادة التشغيل"""
+        if dry_run:
+            current, new = AutoFixer.compute_new_timeout(job.timeout_seconds)
+            analysis.fix_details = (
+                f"[dry-run] سيُرفع timeout من {current}s إلى {new}s"
+                if new != current
+                else f"[dry-run] الـ timeout بلغ الحد الأقصى ({Config.MAX_TIMEOUT}s)"
+            )
+            return 0, 0
+
+        self.fixer.fix(analysis)  # يُعدّل analysis في مكانه
+        if not analysis.fix_applied:
+            return 0, 0
+
+        self.state.record_fix(job.id, analysis.error_type.value, analysis.fix_details or "")
+
+        retries = 0
+        if retry and Config.AUTO_RETRY and self.fixer.retry_job(job.id):
+            retries = 1
+            self.logger.info(f"🔄 أعيد تشغيل: {job.name}")
+        return 1, retries
+
+    @staticmethod
+    def _api_backoff_elapsed(job: OpenClawJob) -> bool:
+        """هل مضى ما يكفي منذ آخر تشغيل فعلي لإعادة المحاولة على خطأ rate-limit؟"""
+        if not job.last_run_at:
+            return True
+        return datetime.now() - job.last_run_at >= timedelta(hours=Config.RETRY_BACKOFF_HOURS)
+
+    def _retry_transient_flow(
+        self, job: OpenClawJob, analysis: FailureAnalysis, dry_run: bool
+    ) -> Tuple[int, int]:
+        """إعادة محاولة مسقوفة للأخطاء العابرة (شبكة / rate-limit)"""
+        count = self.state.get_retry_count(job.id)
+
+        if count >= Config.MAX_RETRIES:
+            analysis.fix_details = (
+                f"استُنفدت محاولات إعادة التشغيل التلقائية ({Config.MAX_RETRIES}) — يحتاج تدخلاً يدوياً"
+            )
+            return 0, 0
+
+        # أخطاء الـ API (429): لا نعيد المحاولة قبل انقضاء فترة التهدئة حتى لا نصطدم بالحد نفسه
+        if analysis.error_type == ErrorType.API_ERROR and not self._api_backoff_elapsed(job):
+            analysis.fix_details = (
+                f"[api] بانتظار انقضاء فترة التهدئة ({Config.RETRY_BACKOFF_HOURS}h) قبل إعادة المحاولة"
+            )
+            return 0, 0
+
+        if dry_run:
+            analysis.fix_details = f"[dry-run] ستُعاد المحاولة تلقائياً ({count + 1}/{Config.MAX_RETRIES})"
+            return 0, 0
+
+        if not self.fixer.retry_job(job.id):
+            analysis.fix_details = "فشلت إعادة التشغيل التلقائية"
+            return 0, 0
+
+        self.state.record_retry(job.id)
+        analysis.fix_applied = True
+        analysis.fix_details = f"أُعيد التشغيل تلقائياً (محاولة {count + 1}/{Config.MAX_RETRIES})"
+        self.logger.info(f"🔄 {job.name}: {analysis.fix_details}")
+        self.state.record_fix(job.id, analysis.error_type.value, analysis.fix_details)
+        return 1, 1
 
     def monitor(
         self,
@@ -857,23 +991,10 @@ class CronMaster:
         for job in failed_jobs:
             analysis = self.analyzer.analyze(job)
 
-            if auto_fix and analysis.auto_fixable and Config.AUTO_FIX_TIMEOUT:
-                if dry_run:
-                    current, new = AutoFixer.compute_new_timeout(job.timeout_seconds)
-                    if new != current:
-                        analysis.fix_details = f"[dry-run] سيُرفع timeout من {current}s إلى {new}s"
-                    else:
-                        analysis.fix_details = f"[dry-run] الـ timeout بلغ الحد الأقصى ({Config.MAX_TIMEOUT}s)"
-                else:
-                    analysis = self.fixer.fix(analysis)
-                    if analysis.fix_applied:
-                        fixes_applied += 1
-                        self.state.record_fix(job.id, analysis.error_type.value, analysis.fix_details or "")
-
-                        # إعادة التشغيل بعد الإصلاح
-                        if retry and Config.AUTO_RETRY and self.fixer.retry_job(job.id):
-                            retries += 1
-                            self.logger.info(f"🔄 أعيد تشغيل: {job.name}")
+            if auto_fix and analysis.auto_fixable:
+                f, r = self._apply_auto_fix(job, analysis, retry=retry, dry_run=dry_run)
+                fixes_applied += f
+                retries += r
 
             analyses.append(analysis)
 
@@ -909,6 +1030,8 @@ class CronMaster:
         if not dry_run:
             for j in recovered:
                 self.state.clear_alerts_for(j.id)
+                self.state.clear_retries_for(j.id)
+            self.state.prune_retries(list(now_failing))
             self.state.set_failing(list(now_failing))
             self.state.save()
 
@@ -974,12 +1097,8 @@ class CronMaster:
         analysis = self.analyzer.analyze(job)
 
         if analysis.auto_fixable:
-            analysis = self.fixer.fix(analysis)
-
-            if analysis.fix_applied:
-                self.state.record_fix(job.id, analysis.error_type.value, analysis.fix_details or "")
-                if retry:
-                    self.fixer.retry_job(job_id)
+            self._apply_auto_fix(job, analysis, retry=retry, dry_run=False)
+            self.state.save()
 
         return analysis.to_dict()
 
