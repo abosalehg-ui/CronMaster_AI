@@ -9,17 +9,20 @@
 | الميزة | الوصف |
 |--------|-------|
 | 🔍 **مراقبة OpenClaw** | يقرأ حالة جميع الـ cron jobs مباشرة |
-| 🔧 **إصلاح تلقائي** | يزيد timeout تلقائياً عند الفشل |
+| 🔧 **إصلاح تلقائي** | يزيد timeout تلقائياً عند الفشل، مع **نسخة احتياطية** لتعريف المهمة قبل أي تعديل |
 | 🔄 **إعادة تشغيل** | يعيد تشغيل المهمة بعد الإصلاح |
-| 📢 **تنبيهات Telegram** | يرسل تنبيه فوري عند الفشل |
-| 📊 **تقارير** | تقارير Markdown و JSON |
+| 📢 **تنبيهات Telegram** | تنبيه عند بلوغ عتبة الفشل، مع **تهدئة** تمنع تكرار نفس التنبيه |
+| 💚 **إشعار تعافٍ** | يخبرك عندما تعود مهمة فاشلة للعمل |
+| 😴 **كشف المهام الصامتة** | ينبهك لمهمة مفعّلة فات موعد تشغيلها المجدول |
+| 🧪 **وضع Dry-Run** | يعرض ما سيفعله دون تنفيذ أي تعديل |
+| 📊 **تقارير وسجل** | تقارير Markdown/JSON وسجل بكل الإصلاحات المطبقة |
 
 ---
 
 ## 🚀 التثبيت
 
 ```bash
-# لا يحتاج تثبيت — يعمل مباشرة مع OpenClaw
+# لا يحتاج تثبيت — يعمل مباشرة مع OpenClaw (مكتبة Python القياسية فقط)
 git clone https://github.com/abosalehg-ui/CronMaster_AI.git
 cd CronMaster_AI
 ```
@@ -44,14 +47,20 @@ python3 CronMaster_AI.py status
 ناجحة ✅:        7
 فاشلة ❌:        1
 حرجة ⚠️:         0
+صامتة 😴:        0
 نسبة النجاح:     87.5%
 ========================================
 ```
+
+> إذا تعذّر التواصل مع OpenClaw نفسه، تفشل الأداة **بصوت عالٍ** (رسالة خطأ وكود خروج 1) — لن ترى أبداً "نجاح 100%" زائفاً.
 
 ### مراقبة وإصلاح تلقائي
 ```bash
 # مراقبة + إصلاح + تنبيه + إعادة تشغيل
 python3 CronMaster_AI.py monitor
+
+# عرض ما سيحدث دون تنفيذ أي تعديل أو إرسال
+python3 CronMaster_AI.py monitor --dry-run
 
 # مراقبة بدون إصلاح
 python3 CronMaster_AI.py monitor --no-fix
@@ -82,6 +91,11 @@ python3 CronMaster_AI.py list
 python3 CronMaster_AI.py fix <job_id>
 ```
 
+### سجل الإصلاحات والتنبيهات
+```bash
+python3 CronMaster_AI.py history --limit 20
+```
+
 ---
 
 ## 🔧 الإصلاح التلقائي
@@ -89,9 +103,10 @@ python3 CronMaster_AI.py fix <job_id>
 عند فشل مهمة بسبب **timeout**:
 
 1. ✅ يكتشف الخطأ تلقائياً
-2. ✅ يزيد timeout بـ 60 ثانية (حد أقصى 300s)
-3. ✅ يعيد تشغيل المهمة
-4. ✅ يرسل تنبيه Telegram بالإصلاح
+2. 💾 يحفظ نسخة احتياطية من تعريف المهمة في `~/.cronmaster/backups/`
+3. ✅ يزيد timeout بـ 120 ثانية (حد أقصى 900s)
+4. ✅ يعيد تشغيل المهمة
+5. ✅ يرسل تنبيه Telegram بالإصلاح
 
 ### أنواع الأخطاء المدعومة
 
@@ -101,8 +116,21 @@ python3 CronMaster_AI.py fix <job_id>
 | `permission_denied` | ❌ لا |
 | `not_found` | ❌ لا |
 | `dependency_error` | ❌ لا |
+| `syntax_error` | ❌ لا |
+| `memory_error` | ❌ لا |
+| `disk_full` | ❌ لا |
 | `network_error` | ❌ لا |
 | `api_error` | ❌ لا |
+
+> أخطاء الشبكة التي تحتوي كلمة "timed out" (مثل `Connection timed out`) تُصنَّف **شبكة** لا مهلة، فلا يُرفع timeout المهمة بلا جدوى.
+
+---
+
+## 📢 سلوك التنبيهات
+
+- يُرسل التنبيه عندما يبلغ الفشل المتتالي `alert_threshold` (افتراضياً 2)، أو فور تطبيق إصلاح تلقائي.
+- لا يتكرر نفس التنبيه (نفس المهمة ونفس نوع الخطأ) قبل انقضاء `alert_cooldown_hours` (افتراضياً 24 ساعة).
+- عند تعافي مهمة، يصلك إشعار تعافٍ ويُصفَّر سجل تنبيهاتها.
 
 ---
 
@@ -126,9 +154,10 @@ openclaw cron add \
 
 ```
 ~/.cronmaster/
-├── cronmaster.log    # سجل العمليات
-├── state.json        # حالة الإصلاحات
-├── backups/          # النسخ الاحتياطية
+├── config.json       # إعداداتك (اختياري)
+├── cronmaster.log    # سجل العمليات (مع تدوير تلقائي)
+├── state.json        # حالة الإصلاحات والتنبيهات
+├── backups/          # نسخ احتياطية لتعريفات المهام قبل تعديلها
 └── reports/          # التقارير المولدة
 ```
 
@@ -136,24 +165,51 @@ openclaw cron add \
 
 ## ⚙️ الإعدادات
 
-في `CronMaster_AI.py` > `class Config`:
+لا حاجة لتعديل الكود. أنشئ `~/.cronmaster/config.json`:
 
-```python
-ALERT_THRESHOLD = 2      # فشل متتالي قبل التنبيه
-TIMEOUT_INCREMENT = 60   # زيادة timeout (ثواني)
-MAX_TIMEOUT = 300        # حد أقصى timeout
-AUTO_RETRY = True        # إعادة تشغيل بعد الإصلاح
-TELEGRAM_CHAT_ID = "..." # Chat ID للتنبيهات
+```json
+{
+  "telegram_chat_id": "YOUR_CHAT_ID",
+  "alert_threshold": 2,
+  "alert_cooldown_hours": 24,
+  "timeout_increment": 120,
+  "max_timeout": 900,
+  "auto_retry": true,
+  "silent_grace_hours": 6
+}
 ```
+
+أو استخدم متغيرات البيئة (لها الأولوية على الملف):
+
+| المتغير | الوصف | الافتراضي |
+|---------|-------|-----------|
+| `CRONMASTER_TELEGRAM_CHAT_ID` | معرف محادثة Telegram للتنبيهات | (فارغ — التنبيهات معطلة) |
+| `CRONMASTER_ALERT_THRESHOLD` | فشل متتالي قبل التنبيه | 2 |
+| `CRONMASTER_ALERT_COOLDOWN_HOURS` | تهدئة تكرار التنبيه (ساعات) | 24 |
+| `CRONMASTER_TIMEOUT_INCREMENT` | زيادة timeout (ثوانٍ) | 120 |
+| `CRONMASTER_MAX_TIMEOUT` | حد أقصى timeout (ثوانٍ) | 900 |
+| `CRONMASTER_AUTO_RETRY` | إعادة تشغيل بعد الإصلاح | true |
+| `CRONMASTER_SILENT_GRACE_HOURS` | سماحية كشف المهام الصامتة (ساعات) | 6 |
+
+---
+
+## 🧪 التطوير والاختبارات
+
+```bash
+pip install pytest ruff
+ruff check .
+pytest -v
+```
+
+تعمل الاختبارات وفحص الجودة تلقائياً عبر GitHub Actions على كل push وpull request.
 
 ---
 
 ## 📜 الترخيص
 
-MIT License
+[MIT License](LICENSE)
 
 ---
 
-**المطور:** Pipbot 🤖  
-**لـ:** عبدالكريم  
-**آخر تحديث:** 2026-04-14
+**المطور:** Pipbot 🤖
+**لـ:** عبدالكريم
