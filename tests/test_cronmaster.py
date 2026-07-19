@@ -41,17 +41,17 @@ def sandbox(tmp_path, monkeypatch):
     [
         ("Request timed out after 30s", cm.ErrorType.TIMEOUT, True),
         ("deadline exceeded", cm.ErrorType.TIMEOUT, True),
-        # أخطاء الشبكة التي تحتوي كلمة timeout يجب ألا تُصنَّف كمهلة قابلة للإصلاح
-        ("Connection timed out", cm.ErrorType.NETWORK_ERROR, False),
-        ("connect ETIMEDOUT 1.2.3.4:443", cm.ErrorType.NETWORK_ERROR, False),
-        ("Connection refused", cm.ErrorType.NETWORK_ERROR, False),
+        # أخطاء الشبكة التي تحتوي كلمة timeout تُصنَّف شبكة (لا مهلة) لكنها قابلة لإعادة المحاولة
+        ("Connection timed out", cm.ErrorType.NETWORK_ERROR, True),
+        ("connect ETIMEDOUT 1.2.3.4:443", cm.ErrorType.NETWORK_ERROR, True),
+        ("Connection refused", cm.ErrorType.NETWORK_ERROR, True),
+        ("HTTP 429 too many requests", cm.ErrorType.API_ERROR, True),
         ("permission denied", cm.ErrorType.PERMISSION_DENIED, False),
         ("ModuleNotFoundError: No module named 'x'", cm.ErrorType.DEPENDENCY_ERROR, False),
         ("bash: foo: command not found", cm.ErrorType.NOT_FOUND, False),
         ("SyntaxError: invalid syntax", cm.ErrorType.SYNTAX_ERROR, False),
         ("MemoryError", cm.ErrorType.MEMORY_ERROR, False),
         ("No space left on device", cm.ErrorType.DISK_FULL, False),
-        ("HTTP 429 too many requests", cm.ErrorType.API_ERROR, False),
         ("شيء غامض تماماً", cm.ErrorType.UNKNOWN, False),
         ("", cm.ErrorType.UNKNOWN, False),
     ],
@@ -477,3 +477,172 @@ def test_status_success_rate_over_measurable_jobs(sandbox, monkeypatch):
     assert result["ok"] == 1
     assert result["error"] == 1
     assert result["success_rate"] == 50.0
+
+
+# ============================================================
+# إعادة المحاولة للأخطاء العابرة (network / api)
+# ============================================================
+
+
+def net_job(**state_overrides):
+    """مهمة فاشلة بخطأ شبكة"""
+    state = {"lastStatus": "error", "lastError": "Connection refused", "consecutiveErrors": 1}
+    state.update(state_overrides)
+    return dict(SAMPLE_JOB, id="net", name="Net Job", payload={}, state=state)
+
+
+def route(payload):
+    """يوجّه cron list لقائمة معطاة ويسجّل بقية الاستدعاءات في .calls (وكلها تنجح)"""
+
+    def fake_run(*args, **kwargs):
+        fake_run.calls.append(args)
+        if args[:2] == ("cron", "list"):
+            return make_completed(stdout=json.dumps(payload))
+        return make_completed()
+
+    fake_run.calls = []
+    return fake_run
+
+
+def test_state_retry_counter_roundtrip(tmp_path):
+    sm = cm.StateManager(tmp_path / "state.json")
+    assert sm.get_retry_count("j") == 0
+    sm.record_retry("j")
+    sm.record_retry("j")
+    assert sm.get_retry_count("j") == 2
+    sm.clear_retries_for("j")
+    assert sm.get_retry_count("j") == 0
+
+
+def test_state_prune_retries(tmp_path):
+    sm = cm.StateManager(tmp_path / "state.json")
+    sm.record_retry("a")
+    sm.record_retry("b")
+    sm.prune_retries(["a"])
+    assert sm.get_retry_count("a") == 1
+    assert sm.get_retry_count("b") == 0
+
+
+def test_network_error_retries_immediately(sandbox, monkeypatch):
+    runner = route([net_job()])
+    monkeypatch.setattr(cm, "run_openclaw", runner)
+    master = cm.CronMaster()
+
+    result = master.monitor(alert=False)
+
+    assert result["fixes_applied"] == 1
+    assert result["retries"] == 1
+    assert ("cron", "run", "net") in runner.calls
+    assert master.state.get_retry_count("net") == 1
+
+
+def test_network_retry_stops_at_max(sandbox, monkeypatch):
+    monkeypatch.setattr(cm.Config, "MAX_RETRIES", 3)
+    runner = route([net_job()])
+    monkeypatch.setattr(cm, "run_openclaw", runner)
+    master = cm.CronMaster()
+    master.state.state["retries"]["net"] = 3  # استُنفدت مسبقاً
+
+    result = master.monitor(alert=False)
+
+    assert result["retries"] == 0
+    assert ("cron", "run", "net") not in runner.calls
+    assert "استُنفدت" in result["analyses"][0]["fix_details"]
+
+
+def test_api_error_defers_within_backoff(sandbox, monkeypatch):
+    monkeypatch.setattr(cm.Config, "RETRY_BACKOFF_HOURS", 1)
+    recent_ms = int((datetime.now() - timedelta(minutes=5)).timestamp() * 1000)
+    job = dict(
+        SAMPLE_JOB,
+        id="api",
+        name="API Job",
+        payload={},
+        state={"lastStatus": "error", "lastError": "HTTP 429", "consecutiveErrors": 1, "lastRunAtMs": recent_ms},
+    )
+    runner = route([job])
+    monkeypatch.setattr(cm, "run_openclaw", runner)
+    master = cm.CronMaster()
+
+    result = master.monitor(alert=False)
+
+    assert result["retries"] == 0
+    assert ("cron", "run", "api") not in runner.calls
+    assert "التهدئة" in result["analyses"][0]["fix_details"]
+    assert master.state.get_retry_count("api") == 0
+
+
+def test_api_error_retries_after_backoff(sandbox, monkeypatch):
+    monkeypatch.setattr(cm.Config, "RETRY_BACKOFF_HOURS", 1)
+    old_ms = int((datetime.now() - timedelta(hours=3)).timestamp() * 1000)
+    job = dict(
+        SAMPLE_JOB,
+        id="api",
+        name="API Job",
+        payload={},
+        state={
+            "lastStatus": "error",
+            "lastError": "rate limit exceeded",
+            "consecutiveErrors": 1,
+            "lastRunAtMs": old_ms,
+        },
+    )
+    runner = route([job])
+    monkeypatch.setattr(cm, "run_openclaw", runner)
+    master = cm.CronMaster()
+
+    result = master.monitor(alert=False)
+
+    assert result["retries"] == 1
+    assert ("cron", "run", "api") in runner.calls
+
+
+def test_recovery_resets_retry_counter(sandbox, monkeypatch):
+    ok_job = dict(SAMPLE_JOB, id="net", name="Net Job", payload={}, state={"lastStatus": "ok"})
+    monkeypatch.setattr(cm, "run_openclaw", route([ok_job]))
+    master = cm.CronMaster()
+    master.state.set_failing(["net"])
+    master.state.record_retry("net")
+    master.state.record_retry("net")
+    master.state.save()
+
+    master.monitor(alert=False)
+
+    assert master.state.get_retry_count("net") == 0
+
+
+def test_transient_dry_run_does_not_retry(sandbox, monkeypatch):
+    runner = route([net_job()])
+    monkeypatch.setattr(cm, "run_openclaw", runner)
+    master = cm.CronMaster()
+
+    result = master.monitor(dry_run=True)
+
+    assert result["retries"] == 0
+    assert ("cron", "run", "net") not in runner.calls
+    assert "[dry-run]" in result["analyses"][0]["fix_details"]
+    assert master.state.get_retry_count("net") == 0
+
+
+def test_transient_retry_disabled_by_config(sandbox, monkeypatch):
+    monkeypatch.setattr(cm.Config, "AUTO_RETRY_TRANSIENT", False)
+    runner = route([net_job()])
+    monkeypatch.setattr(cm, "run_openclaw", runner)
+    master = cm.CronMaster()
+
+    result = master.monitor(alert=False)
+
+    assert result["fixes_applied"] == 0
+    assert ("cron", "run", "net") not in runner.calls
+
+
+def test_fix_job_transient_retries(sandbox, monkeypatch):
+    runner = route([net_job()])
+    monkeypatch.setattr(cm, "run_openclaw", runner)
+    master = cm.CronMaster()
+
+    result = master.fix_job("net")
+
+    assert result["fix_applied"] is True
+    assert ("cron", "run", "net") in runner.calls
+    assert master.state.get_retry_count("net") == 1
