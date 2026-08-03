@@ -1,10 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "cronmaster-ai"
-version = "2.0.0"
-description = "مدير ومراقب ذكي لمهام OpenClaw Cron مع إصلاح تلقائي"
+version = "3.0.0"
+description = "مدير ومراقب ذكي للمهام المجدولة مع إصلاح تلقائي وسجل تاريخي"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+# مصنّف الأخطاء الاختياري — النواة تعمل بدونه بمكتبة Python القياسية فقط
+ai = ["anthropic>=0.40"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+cronmaster = "cronmaster.cli:main"
+
+[tool.setuptools]
+packages = [
+    "cronmaster",
+    "cronmaster.analysis",
+    "cronmaster.backends",
+    "cronmaster.notifiers",
+    "cronmaster.reporting",
+]
+py-modules = ["CronMaster_AI"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

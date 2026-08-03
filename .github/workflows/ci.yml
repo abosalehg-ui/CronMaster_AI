@@ -21,3 +21,20 @@ jobs:
         run: ruff check .
       - name: Tests
         run: pytest -v
+      # النواة يجب أن تعمل بلا أي حزمة طرف ثالث — لم يُثبَّت هنا سوى pytest/ruff
+      - name: Stdlib-only smoke test
+        run: |
+          python3 CronMaster_AI.py --version
+          python3 -c "import CronMaster_AI, cronmaster; print(cronmaster.__version__)"
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the package
+        run: pip install .
+      - name: Console entry point works
+        run: cronmaster --version
