@@ -372,3 +372,58 @@ def test_shim_exposes_version():
     import CronMaster_AI as cm
 
     assert cm.__version__.count(".") == 2
+
+
+# ============================================================
+# وضعا الإخراج: بشري و JSON
+# ============================================================
+
+
+def test_monitor_defaults_to_json_when_not_a_tty(cli, capsys):
+    """المخرجات غير الطرفية تبقى JSON حتى لا تنكسر السكربتات القائمة"""
+    cli(["monitor", "--no-alert", "--no-fix"], jobs=[make_job(id="a", last_status="ok")])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total_jobs"] == 1
+
+
+def test_monitor_prints_human_summary_on_a_tty(cli, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+    cli(["monitor", "--no-alert"], jobs=[failing_job(error="permission denied")])
+    out = capsys.readouterr().out
+    assert t("human.monitor_title") in out
+    assert t("human.failed") in out
+    assert "permission_denied" in out
+    assert "{" not in out  # لا JSON خام
+
+
+def test_json_flag_forces_json_on_a_tty(cli, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+    cli(["monitor", "--no-alert", "--json"], jobs=[make_job(id="a", last_status="ok")])
+    assert json.loads(capsys.readouterr().out)["total_jobs"] == 1
+
+
+@pytest.mark.parametrize("command", [["list"], ["history"], ["fix", "j1"]])
+def test_human_mode_for_every_json_command(cli, capsys, monkeypatch, command):
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+    cli(command, jobs=[failing_job(error="permission denied")])
+    out = capsys.readouterr().out
+    assert out.strip()
+    assert not out.lstrip().startswith(("{", "["))
+
+
+@pytest.mark.parametrize("command", [["list"], ["history"], ["fix", "j1"]])
+def test_json_flag_for_every_json_command(cli, capsys, monkeypatch, command):
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+    cli([*command, "--json"], jobs=[failing_job(error="permission denied")])
+    json.loads(capsys.readouterr().out)  # يرفع عند مخرجات غير صالحة
+
+
+def test_unexpected_exception_is_reported_not_traced(cli, capsys, monkeypatch):
+    """أي استثناء غير متوقع يصل المستخدم كسطر واضح لا كـ traceback"""
+    monkeypatch.setattr(core_module.CronMaster, "status", lambda self: (_ for _ in ()).throw(OSError("disk on fire")))
+    code, _ = cli(["status"])
+    err = capsys.readouterr().err
+    assert code == EXIT_MONITOR_FAILURE
+    assert "disk on fire" in err
+    assert "cronmaster.log" in err
+    assert "Traceback" not in err

@@ -3,6 +3,7 @@
 
 import logging
 from datetime import datetime, time
+from zoneinfo import ZoneInfo  # مضمونة على 3.9+
 from typing import Any, Dict, List, Optional
 
 from ..config import Config
@@ -48,7 +49,14 @@ def build_notifiers(specs: Optional[List[Dict[str, Any]]] = None, telegram_chat_
             elif cls is NullNotifier:
                 notifiers.append(NullNotifier())
             else:
-                notifiers.append(cls(url=spec.get("url", ""), field=spec.get("field"), headers=spec.get("headers")))
+                notifiers.append(
+                    cls(
+                        url=spec.get("url", ""),
+                        field=spec.get("field"),
+                        headers=spec.get("headers"),
+                        allow_insecure=spec.get("allow_insecure"),
+                    )
+                )
         except (TypeError, ValueError) as e:
             logger.warning("تعذر بناء قناة %s: %s", kind, e)
 
@@ -77,13 +85,6 @@ def _parse_hhmm(value: Any) -> Optional[time]:
 def _now_in_tz(tz_name: Optional[str]) -> datetime:
     """الوقت الحالي في المنطقة المطلوبة، مع سقوط إلى التوقيت المحلي"""
     if not tz_name:
-        return datetime.now()
-    try:
-        from zoneinfo import ZoneInfo  # Python 3.9+
-    except ImportError:
-        logging.getLogger(__name__).warning(
-            "zoneinfo غير متاحة على هذا الإصدار من Python — ستُحسب فترة الهدوء بالتوقيت المحلي"
-        )
         return datetime.now()
     try:
         return datetime.now(ZoneInfo(tz_name))

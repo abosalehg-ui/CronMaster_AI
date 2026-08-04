@@ -5,6 +5,7 @@ import logging
 import re
 from typing import Optional
 
+from ..i18n import t
 from ..models import ErrorType, FailureAnalysis, Job
 from .errors_db import ERROR_DATABASE
 
@@ -42,7 +43,7 @@ class ErrorAnalyzer:
                 return FailureAnalysis(
                     job=job,
                     error_type=sig.error_type,
-                    description=sig.description_ar,
+                    description=sig.description,
                     suggested_fix=sig.suggested_fix,
                     auto_fixable=sig.auto_fixable,
                 )
@@ -51,8 +52,8 @@ class ErrorAnalyzer:
         return FailureAnalysis(
             job=job,
             error_type=ErrorType.UNKNOWN,
-            description="خطأ غير مصنف",
-            suggested_fix="راجع السجلات",
+            description=t("error.unknown.desc"),
+            suggested_fix=t("error.unknown.fix"),
         )
 
 

@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cronmaster-ai"
-version = "3.0.0"
+version = "3.1.0"
 description = "مدير ومراقب ذكي للمهام المجدولة مع إصلاح تلقائي وسجل تاريخي"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 dependencies = []
 
@@ -35,7 +35,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py38"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B"]

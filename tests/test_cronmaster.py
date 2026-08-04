@@ -227,9 +227,23 @@ def test_state_roundtrip(tmp_path):
     state_file = tmp_path / "state.json"
     sm = cm.StateManager(state_file)
     sm.record_fix("a", "timeout", "x")
+    sm.save()  # التسجيل يعدّل الحالة في الذاكرة؛ الكتابة للقرص تجري مرة واحدة عند الحفظ
     sm2 = cm.StateManager(state_file)
     assert len(sm2.state["fixes_applied"]) == 1
     assert sm2.state["fixes_applied"][0]["job_id"] == "a"
+
+
+def test_record_fix_does_not_touch_disk(tmp_path):
+    """الكتابة عند كل إصلاح كانت تستبدل ملف الحالة N مرة في الدورة الواحدة"""
+    state_file = tmp_path / "state.json"
+    sm = cm.StateManager(state_file)
+    for i in range(5):
+        sm.record_fix(f"job-{i}", "timeout", "x")
+    assert not state_file.exists()
+    assert len(sm.state["fixes_applied"]) == 5
+
+    sm.save()
+    assert len(cm.StateManager(state_file).state["fixes_applied"]) == 5
 
 
 def test_state_corrupt_file_resets_with_defaults(tmp_path):

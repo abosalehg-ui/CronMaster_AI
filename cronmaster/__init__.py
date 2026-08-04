@@ -5,7 +5,7 @@
 التخزين، التنبيهات، التقارير، المقاييس، ثم المنسّق وواجهة سطر الأوامر.
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 from .config import Config, setup_logging
 from .core import (

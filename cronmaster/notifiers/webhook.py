@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional
 
+from ..config import Config
 from .base import Notifier
 
 DEFAULT_TIMEOUT = 10
@@ -18,15 +19,37 @@ class WebhookNotifier(Notifier):
     # اسم الحقل الذي يحمل نص الرسالة في الحمولة
     field = "text"
 
-    def __init__(self, url: str, field: Optional[str] = None, headers: Optional[Dict[str, str]] = None):
+    def __init__(
+        self,
+        url: str,
+        field: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        allow_insecure: Optional[bool] = None,
+    ):
         super().__init__()
         self.url = url or ""
         if field:
             self.field = field
         self.headers = headers or {}
+        self.allow_insecure = Config.ALLOW_INSECURE_WEBHOOKS if allow_insecure is None else bool(allow_insecure)
 
     def validate(self) -> bool:
-        return self.url.startswith(("http://", "https://"))
+        """عنوان صالح: https دائماً، وhttp فقط عند السماح الصريح.
+
+        نص التنبيه يحمل أسماء المهام وأوصاف الأخطاء، وإرساله على http يعني
+        عبوره الشبكة بلا تشفير. تبقى http متاحة لشبكة داخلية لكن بقرار صريح.
+        """
+        if self.url.startswith("https://"):
+            return True
+        if self.url.startswith("http://"):
+            if self.allow_insecure:
+                self.logger.warning("قناة %s تستعمل http بلا تشفير: %s", self.name, self.url)
+                return True
+            self.logger.warning(
+                "قناة %s ترفض http بلا تشفير — استخدم https أو فعّل allow_insecure_webhooks", self.name
+            )
+            return False
+        return False
 
     def build_payload(self, message: str) -> Dict[str, Any]:
         return {self.field: message}
