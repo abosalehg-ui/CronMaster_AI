@@ -3,14 +3,17 @@
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
 from . import __version__
+from . import format as fmt
 from .backends import BACKENDS
 from .backends.base import BackendError
 from .config import Config, setup_logging
 from .core import EXIT_MONITOR_FAILURE, CronMaster
+from .format import label_column, pad_label
 from .i18n import SUPPORTED_LANGS, set_lang, t
 from .lock import ExecutionLock
 from .reporting import FORMATS
@@ -52,6 +55,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     mon.add_argument("--no-retry", action="store_true", help="بدون إعادة تشغيل")
     mon.add_argument("--dry-run", action="store_true", help="عرض ما سيحدث دون أي تنفيذ")
     mon.add_argument("--prometheus-textfile", metavar="PATH", help="كتابة مقاييس Prometheus إلى ملف نصي")
+    mon.add_argument("--json", action="store_true", help="مخرجات JSON بدل العرض البشري")
 
     # status
     subparsers.add_parser("status", help="حالة سريعة")
@@ -61,16 +65,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     rep.add_argument("--format", "-f", dest="fmt", choices=list(FORMATS), default="markdown")
 
     # list
-    subparsers.add_parser("list", help="قائمة المهام")
+    jobs = subparsers.add_parser("list", help="قائمة المهام")
+    jobs.add_argument("--json", action="store_true", help="مخرجات JSON بدل العرض البشري")
 
     # fix
     fix = subparsers.add_parser("fix", help="إصلاح مهمة")
     fix.add_argument("job_id", help="معرف المهمة")
     fix.add_argument("--no-retry", action="store_true", help="بدون إعادة تشغيل")
+    fix.add_argument("--json", action="store_true", help="مخرجات JSON بدل العرض البشري")
 
     # history
     hist = subparsers.add_parser("history", help="سجل الإصلاحات والتنبيهات")
     hist.add_argument("--limit", type=int, default=20, help="عدد السجلات (افتراضي 20)")
+    hist.add_argument("--json", action="store_true", help="مخرجات JSON بدل العرض البشري")
 
     # stats
     stats = subparsers.add_parser("stats", help="إحصائيات من السجل التاريخي")
@@ -80,7 +87,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # restore
     restore = subparsers.add_parser("restore", help="استعادة مهمة من نسخة احتياطية")
     restore.add_argument("job_id", help="معرف المهمة")
-    restore.add_argument("--backup", help="ملف نسخة احتياطية محدد")
+    restore.add_argument("--backup", help="ملف نسخة احتياطية محدد (داخل مجلد النسخ)")
     restore.add_argument("--list", dest="list_only", action="store_true", help="عرض النسخ المتاحة فقط")
     restore.add_argument("--yes", "-y", action="store_true", help="بدون سؤال تأكيد")
 
@@ -95,43 +102,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
 # ============================================================
 
 
+def _print_pairs(pairs):
+    """جدول تسمية/قيمة بمحاذاة محسوبة من عرض العرض الفعلي لا من عدد المحارف"""
+    column = label_column(label for label, _ in pairs)
+    for label, value in pairs:
+        print(f"{pad_label(label, column)}{value}")
+
+
 def _print_status(result):
     print("=" * 40)
     print(t("status.title"))
     print("=" * 40)
-    # المسافات مضبوطة يدوياً لتطابق المخرجات العربية التاريخية حرفياً
-    print(f"{t('status.total')}   {result['total_jobs']}")
-    print(f"{t('status.ok')}        {result['ok']}")
-    print(f"{t('status.error')}        {result['error']}")
-    print(f"{t('status.critical')}         {result['critical']}")
-    print(f"{t('status.silent')}        {result['silent']}")
-    print(f"{t('status.rate')}     {result['success_rate']:.1f}%")
+    _print_pairs(
+        [
+            (t("status.total"), result["total_jobs"]),
+            (t("status.ok"), result["ok"]),
+            (t("status.error"), result["error"]),
+            (t("status.critical"), result["critical"]),
+            (t("status.silent"), result["silent"]),
+            (t("status.rate"), f"{result['success_rate']:.1f}%"),
+        ]
+    )
     print("=" * 40)
-
-
-def _fmt_pct(value):
-    return "—" if value is None else f"{value * 100:.0f}%"
-
-
-def _fmt_secs(value):
-    return "—" if value is None else f"{value:.1f}s"
-
-
-def _fmt_trend(ratio):
-    if ratio is None:
-        return "—"
-    if ratio >= 1.25:
-        return t("stats.trend_up")
-    if ratio <= 0.8:
-        return t("stats.trend_down")
-    return t("stats.trend_flat")
-
-
-def _fmt_duration(seconds):
-    if seconds is None:
-        return "—"
-    hours = seconds / 3600
-    return f"{hours:.1f}h" if hours >= 1 else f"{seconds / 60:.0f}m"
 
 
 def _print_stats(result):
@@ -147,13 +139,128 @@ def _print_stats(result):
         return
     for entry in result["jobs"]:
         print(f"• {entry['job_name']}  [{entry['job_id']}]")
-        print(f"   {t('stats.success_rate')}: {_fmt_pct(entry['success_rate'])}"
-              f"   {t('stats.flakiness')}: {_fmt_pct(entry['flakiness'])}"
+        print(f"   {t('stats.success_rate')}: {fmt.pct(entry['success_rate'])}"
+              f"   {t('stats.flakiness')}: {fmt.pct(entry['flakiness'])}"
               f"   ({entry['runs']} {t('stats.samples')})")
-        print(f"   {t('stats.avg_duration')}: {_fmt_secs(entry['avg_duration'])}"
-              f"   {t('stats.trend')}: {_fmt_trend(entry['duration_ratio'])}"
-              f"   {t('stats.mtbf')}: {_fmt_duration(entry['mtbf_seconds'])}")
+        print(f"   {t('stats.avg_duration')}: {fmt.secs(entry['avg_duration'])}"
+              f"   {t('stats.trend')}: {fmt.trend(entry['duration_ratio'])}"
+              f"   {t('stats.mtbf')}: {fmt.duration(entry['mtbf_seconds'])}")
     print("=" * 60)
+
+
+def _print_analysis(analysis):
+    """كتلة تشخيص مهمة فاشلة واحدة"""
+    mark = "✅" if analysis.get("fix_applied") else "❌"
+    print(f"{mark} {analysis.get('job_name', '')}  [{analysis.get('job_id', '')}]")
+    print(f"   {t('alert.error_type')}: {analysis.get('error_type', '')}")
+    print(f"   {t('alert.analysis')}: {analysis.get('description', '')}")
+    if analysis.get("fix_applied") or analysis.get("fix_details"):
+        print(f"   {t('alert.fix')}: {analysis.get('fix_details') or ''}")
+    else:
+        print(f"   {t('alert.suggestion')}: {analysis.get('suggested_fix', '')}")
+
+
+def _print_monitor(result):
+    """ملخص دورة المراقبة بدل سكب كائن JSON كامل على الطرفية"""
+    if result.get("error"):
+        print(t("human.monitor_error", error=result["error"]), file=sys.stderr)
+        return
+
+    print("=" * 60)
+    print(t("human.monitor_title"))
+    if result.get("dry_run"):
+        print(t("human.dry_run_note"))
+    print("=" * 60)
+    _print_pairs(
+        [
+            (t("human.total"), result.get("total_jobs", 0)),
+            (t("human.failed"), result.get("failed_jobs", 0)),
+            (t("human.fixes"), result.get("fixes_applied", 0)),
+            (t("human.retries"), result.get("retries", 0)),
+            (t("human.recovered"), len(result.get("recovered_jobs", []))),
+            (t("human.silent"), len(result.get("silent_jobs", []))),
+            (t("human.alert_sent"), t("human.yes") if result.get("alert_sent") else t("human.no")),
+        ]
+    )
+
+    analyses = result.get("analyses", [])
+    if analyses:
+        print("-" * 60)
+        for analysis in analyses:
+            _print_analysis(analysis)
+
+    notices = result.get("notices", [])
+    if notices:
+        print("-" * 60)
+        print(t("human.notices"))
+        for notice in notices:
+            print(f"   {notice}")
+
+    print("=" * 60)
+    print(t("human.hint_json"))
+
+
+def _print_jobs(jobs):
+    print("=" * 60)
+    print(t("human.jobs_title"))
+    print("=" * 60)
+    if not jobs:
+        print(t("human.no_jobs"))
+        return
+    for job in jobs:
+        state = job.get("last_status") or ("—" if job.get("enabled") else "disabled")
+        mark = "❌" if state == "error" else ("✅" if state == "ok" else "⏸️")
+        print(f"{mark} {job.get('name', '')}  [{job.get('id', '')}]")
+        print(f"   {t('html.col_schedule')}: {job.get('schedule', '')}"
+              f"   {t('html.col_status')}: {state}")
+    print("=" * 60)
+
+
+def _print_fix(result):
+    if result.get("error"):
+        print(result["error"], file=sys.stderr)
+        return
+    print("=" * 60)
+    print(t("human.fix_title"))
+    print("=" * 60)
+    _print_analysis(result)
+    print("=" * 60)
+
+
+def _print_history(history):
+    print("=" * 60)
+    print(t("human.history_title"))
+    print("=" * 60)
+    fixes = history.get("fixes", [])
+    if not fixes:
+        print(t("human.no_history"))
+    for fix in reversed(fixes):
+        stamp = str(fix.get("timestamp", ""))[:19].replace("T", " ")
+        print(f"• {stamp}  {fix.get('fix_type', '')}  [{fix.get('job_id', '')}]")
+        if fix.get("details"):
+            print(f"   {fix['details']}")
+    if history.get("last_run"):
+        print("-" * 60)
+        print(f"{t('human.last_run')} {str(history['last_run'])[:19].replace('T', ' ')}")
+    print("=" * 60)
+
+
+def _wants_json(args) -> bool:
+    """JSON عند طلبه صراحةً، أو حين لا تكون المخرجات طرفية — فلا تنكسر السكربتات"""
+    if getattr(args, "json", False):
+        return True
+    try:
+        return not sys.stdout.isatty()
+    except (AttributeError, ValueError):  # مخرجات مغلقة أو مستبدلة
+        return True
+
+
+def _emit(data, args, printer):
+    """طباعة بشرية أو JSON حسب السياق"""
+    if _wants_json(args):
+        print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+    else:
+        printer(data)
 
 
 def _print_doctor(result):
@@ -173,6 +280,27 @@ def _print_doctor(result):
     print(t("doctor.passed") if result["ok"] else t("doctor.failed"))
 
 
+def _resolve_backup(requested, default_path):
+    """اختيار ملف النسخة الاحتياطية، محصوراً في مجلد النسخ.
+
+    المسار المطلق كان يمرّ كما هو فتُقرأ أي حمولة JSON على النظام وتُطبَّق على
+    مهمة حيّة. الخطورة محدودة (المستخدم يملك صلاحياته) لكن مبدأ أقل دهشة يقتضي
+    أن يكون مصدر الاستعادة هو مجلد النسخ لا أي مكان آخر.
+    """
+    if not requested:
+        return default_path
+
+    backup_dir = Config.BACKUP_DIR.resolve()
+    candidate = Path(requested)
+    if not candidate.is_absolute():
+        candidate = backup_dir / candidate.name
+
+    resolved = candidate.resolve()
+    if resolved == backup_dir or backup_dir not in resolved.parents:
+        return None
+    return resolved
+
+
 def _run_restore(master, args) -> int:
     backups = master.list_backups(args.job_id)
     if not backups:
@@ -185,9 +313,10 @@ def _run_restore(master, args) -> int:
             print(f"  {path.name}")
         return 0
 
-    chosen = Path(args.backup) if args.backup else backups[0]
-    if not chosen.is_absolute() and not chosen.exists():
-        chosen = Config.BACKUP_DIR / chosen.name
+    chosen = _resolve_backup(args.backup, backups[0])
+    if chosen is None:
+        print(t("restore.outside_dir", dir=Config.BACKUP_DIR), file=sys.stderr)
+        return 1
 
     if not args.yes:
         try:
@@ -228,7 +357,7 @@ def _run_monitor(master, args) -> int:
     finally:
         lock.release()
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    _emit(result, args, _print_monitor)
     return CronMaster.exit_code(result)
 
 
@@ -268,14 +397,13 @@ def main():
             print(t("report.generated", path=path))
 
         elif args.command == "list":
-            print(json.dumps(master.list_jobs(), indent=2, ensure_ascii=False))
+            _emit(master.list_jobs(), args, _print_jobs)
 
         elif args.command == "fix":
-            result = master.fix_job(args.job_id, retry=not args.no_retry)
-            print(json.dumps(result, indent=2, ensure_ascii=False))
+            _emit(master.fix_job(args.job_id, retry=not args.no_retry), args, _print_fix)
 
         elif args.command == "history":
-            print(json.dumps(master.history(limit=args.limit), indent=2, ensure_ascii=False))
+            _emit(master.history(limit=args.limit), args, _print_history)
 
         elif args.command == "stats":
             _print_stats(master.stats(job_id=args.job, days=args.days))
@@ -290,6 +418,11 @@ def main():
 
     except BackendError as e:
         print(t("cli.backend_error", error=e), file=sys.stderr)
+        sys.exit(EXIT_MONITOR_FAILURE)
+
+    except Exception as e:  # noqa: BLE001 — الحد الأخير: لا نُخرج traceback خاماً للمستخدم
+        logging.getLogger(__name__).exception("استثناء غير متوقع في الأمر %s", args.command)
+        print(t("cli.unexpected_error", error=e, log=Config.log_file()), file=sys.stderr)
         sys.exit(EXIT_MONITOR_FAILURE)
 
 

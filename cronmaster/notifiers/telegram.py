@@ -42,11 +42,11 @@ class TelegramNotifier(Notifier):
                 "--message", message,
             )
         except _openclaw.OpenClawError as e:
-            self.logger.error(f"خطأ في الإرسال: {e}")
+            self.logger.error("خطأ في الإرسال: %s", e)
             return False
 
         if result.returncode == 0:
             self.logger.info("تم إرسال التنبيه")
             return True
-        self.logger.error(f"فشل الإرسال: {result.stderr.strip()}")
+        self.logger.error("فشل الإرسال: %s", result.stderr.strip())
         return False

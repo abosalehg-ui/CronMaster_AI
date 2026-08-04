@@ -87,6 +87,43 @@ def reset_announcements() -> None:
     _ANNOUNCED.clear()
 
 
+#: أنماط أسرار شائعة في نصوص أخطاء المهام المجدولة
+_SECRET_PATTERNS = [
+    # token=..., "api_key": "...", Authorization: Bearer ...
+    re.compile(
+        r"(?i)\b(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|password|passwd|pwd|"
+        r"authorization|bearer|client[_-]?secret|private[_-]?key|session[_-]?id)\b"
+        r"(\s*[=:]\s*|\s+)"
+        r"(\"[^\"]*\"|'[^']*'|\S+)"
+    ),
+    # معاملات حساسة داخل عناوين URL
+    re.compile(r"(?i)([?&](?:api[_-]?key|token|key|secret|password|sig|signature)=)[^\s&#]+"),
+    # بيانات اعتماد داخل عنوان: scheme://user:pass@host
+    re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@"),
+    # مفاتيح معروفة الشكل ورموز JWT
+    re.compile(r"\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{12,})\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+"),
+]
+
+REDACTED = "<محجوب>"
+
+
+def redact(text: str) -> str:
+    """حجب الأسرار قبل مغادرة النص إلى طرف ثالث.
+
+    نصوص أخطاء المهام تحوي بانتظام رموزاً وترويسات مصادقة وسلاسل اتصال. المصنّف
+    يحتاج **شكل** الخطأ لا قيمة السر، فحجبها لا يُضعف التصنيف.
+    """
+    if not text:
+        return ""
+    redacted = _SECRET_PATTERNS[0].sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
+    redacted = _SECRET_PATTERNS[1].sub(lambda m: f"{m.group(1)}{REDACTED}", redacted)
+    redacted = _SECRET_PATTERNS[2].sub(lambda m: f"{m.group(1)}{REDACTED}@", redacted)
+    for pattern in _SECRET_PATTERNS[3:]:
+        redacted = pattern.sub(REDACTED, redacted)
+    return redacted
+
+
 def normalize_error_text(text: str) -> str:
     """توحيد نص الخطأ قبل التجزئة: تصغير، ضغط المسافات، وتعميم الأرقام والمعرّفات.
 
@@ -209,15 +246,17 @@ class LLMClassifier:
         except ImportError:  # pragma: no cover — تحقق منه في _get_client
             return None
 
+        # الحجب قبل القطع: لا يغادر الجهاز نص فيه رمز أو كلمة مرور أو سلسلة اتصال
+        safe_text = redact(error_text)[:4000]
         user_text = (
             "صنّف الخطأ التالي لمهمة مجدولة.\n"
-            f"اسم المهمة: {job.name}\n"
+            f"اسم المهمة: {redact(job.name)}\n"
             f"جدولة المهمة: {job.schedule}\n"
             f"المهلة المضبوطة: {job.timeout_seconds if job.timeout_seconds is not None else 'غير محددة'}\n"
             f"عدد الفشل المتتالي: {job.consecutive_errors}\n"
             "نص الخطأ:\n"
             "<error>\n"
-            f"{error_text[:4000]}\n"
+            f"{safe_text}\n"
             "</error>"
         )
 

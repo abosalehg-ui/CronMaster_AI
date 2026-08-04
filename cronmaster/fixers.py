@@ -45,10 +45,10 @@ class AutoFixer:
             Config.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
             backup_file = Config.BACKUP_DIR / f"{job.id}_{datetime.now():%Y%m%d_%H%M%S}.json"
             write_secure(backup_file, json.dumps(job.raw, indent=2, ensure_ascii=False))
-            self.logger.info(f"💾 نسخة احتياطية: {backup_file}")
+            self.logger.info("💾 نسخة احتياطية: %s", backup_file)
             return backup_file
         except OSError as e:
-            self.logger.warning(f"تعذر حفظ النسخة الاحتياطية لـ {job.name}: {e}")
+            self.logger.warning("تعذر حفظ النسخة الاحتياطية لـ %s: %s", job.name, e)
             return None
 
     @staticmethod
@@ -143,7 +143,7 @@ class AutoFixer:
         current_timeout, new_timeout = self.compute_new_timeout(job.timeout_seconds)
 
         if new_timeout == current_timeout:
-            analysis.fix_details = f"الـ timeout وصل الحد الأقصى ({Config.MAX_TIMEOUT}s)"
+            analysis.fix_details = t("fix.timeout_max", max=Config.MAX_TIMEOUT)
             return analysis
 
         if not self.backend.supports(Capability.SET_TIMEOUT):
@@ -156,13 +156,13 @@ class AutoFixer:
         try:
             self.backend.set_timeout(job.id, new_timeout)
         except BackendError as e:
-            analysis.fix_details = f"فشل تحديث timeout: {e}"
+            analysis.fix_details = t("fix.timeout_failed", error=e)
             self.logger.error(analysis.fix_details)
             return analysis
 
         analysis.fix_applied = True
-        analysis.fix_details = f"تم زيادة timeout من {current_timeout}s إلى {new_timeout}s"
-        self.logger.info(f"✅ {job.name}: {analysis.fix_details}")
+        analysis.fix_details = t("fix.timeout_raised", old=current_timeout, new=new_timeout)
+        self.logger.info("✅ %s: %s", job.name, analysis.fix_details)
         return analysis
 
     def retry_job(self, job_id: str) -> bool:
@@ -173,7 +173,7 @@ class AutoFixer:
         try:
             return bool(self.backend.run_job(job_id))
         except BackendError as e:
-            self.logger.error(f"فشل إعادة التشغيل: {e}")
+            self.logger.error("فشل إعادة التشغيل: %s", e)
             return False
 
     def set_timeout(self, job: Job, seconds: int, backup: bool = True) -> bool:

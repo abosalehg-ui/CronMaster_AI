@@ -6,6 +6,7 @@ crontab لا يحتفظ بحالة تشغيل ولا بمهلة لكل مهمة�
 المنسّق يقرأ ``capabilities`` قبل أي عملية فيتدرّج بلطف بدل أن ينهار.
 """
 
+import hashlib
 import re
 import subprocess
 from typing import List, Optional, Tuple
@@ -119,17 +120,26 @@ class SystemCrontabBackend(CronBackend):
     @staticmethod
     def _job_id(command: str) -> str:
         """معرّف مستقر مشتق من الأمر نفسه — crontab لا يعطي معرّفات"""
-        import hashlib
-
         return hashlib.sha1(command.encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _fingerprint(content: str) -> str:
+        """بصمة محتوى الجدول — تُستخدم لكشف تعديل متزامن"""
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------
     # التعديل
     # ------------------------------------------------------------
 
     def _rewrite(self, job_id: str, transform) -> bool:
-        """إعادة كتابة السطر الموافق للمهمة عبر دالة تحويل"""
-        lines = self.read_raw().splitlines()
+        """إعادة كتابة السطر الموافق للمهمة عبر دالة تحويل.
+
+        العملية قراءة‑تعديل‑كتابة على ملف يملكه المستخدم أيضاً، وقد يحرره بـ
+        ``crontab -e`` في الأثناء. نحتفظ ببصمة المحتوى المقروء ونتحقق منها قبل
+        الكتابة، فيُلغى التغيير بدل أن تُفقد تعديلات المستخدم بصمت.
+        """
+        original = self.read_raw()
+        lines = original.splitlines()
         changed = False
 
         for i, line in enumerate(lines):
@@ -147,6 +157,9 @@ class SystemCrontabBackend(CronBackend):
 
         if not changed:
             return False
+
+        if self._fingerprint(self.read_raw()) != self._fingerprint(original):
+            raise CrontabError("تغيّر crontab أثناء التعديل — أُلغي التغيير، أعد المحاولة")
 
         content = "\n".join(lines) + "\n"
         result = run_crontab("-", stdin=content)

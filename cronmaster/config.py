@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """الإعدادات المركزية وإعداد التسجيل."""
 
+import copy
 import json
 import logging
 import os
@@ -91,6 +92,9 @@ class Config:
     # فترة الهدوء: {"from": "22:00", "to": "07:00", "tz": "Asia/Riyadh"}
     QUIET_HOURS: Dict[str, Any] = {}
 
+    # السماح بقنوات webhook على http بلا تشفير (شبكة داخلية) — مرفوض افتراضياً
+    ALLOW_INSECURE_WEBHOOKS = False
+
     # التكامل مع أنظمة المراقبة
     HEALTHCHECK_PING_URL = ""
     PROMETHEUS_TEXTFILE = ""
@@ -125,6 +129,7 @@ class Config:
             "ROLLBACK_TIMEOUT_ENABLED",
             "AUTO_RESCHEDULE",
             "LLM_ENABLED",
+            "ALLOW_INSECURE_WEBHOOKS",
         }
     )
     _STR_KEYS = frozenset(
@@ -139,9 +144,13 @@ class Config:
     )
     _LIST_KEYS = frozenset({"NOTIFIERS"})
     _DICT_KEYS = frozenset({"QUIET_HOURS"})
+    # مسارات غير قابلة للضبط من ملف الإعدادات، لكنها تدخل اللقطة لأن الاختبارات تعيد توجيهها
+    _PATH_KEYS = frozenset({"WORK_DIR", "BACKUP_DIR", "REPORTS_DIR", "STATE_FILE", "CONFIG_FILE"})
 
     # مفاتيح غير معروفة صادفناها في آخر تحميل — يستخدمها أمر doctor
     unknown_keys: List[str] = []
+    # مفاتيح صُحِّحت قيمتها أثناء التحقق (نوع خاطئ أو قيمة خارج المدى) — يعرضها doctor
+    coerced_keys: List[str] = []
 
     # ------------------------------------------------------------
     # مسارات مشتقة: تُحسب وقت الاستدعاء لا وقت الاستيراد، حتى يكفي
@@ -163,6 +172,25 @@ class Config:
     @classmethod
     def configurable_keys(cls) -> frozenset:
         return cls._INT_KEYS | cls._FLOAT_KEYS | cls._BOOL_KEYS | cls._STR_KEYS | cls._LIST_KEYS | cls._DICT_KEYS
+
+    @classmethod
+    def snapshot(cls) -> Dict[str, Any]:
+        """لقطة من كل إعداد قابل للضبط ومن المسارات المشتقة.
+
+        تُشتق القائمة من ``configurable_keys`` لا من قائمة مكتوبة يدوياً، فأي
+        إعداد جديد يدخل اللقطة تلقائياً — وهذا ما يمنع تسرّب الحالة بين
+        الاختبارات حين يُضاف مفتاح ويُنسى تسجيله.
+        """
+        keys = set(cls.configurable_keys()) | set(cls._PATH_KEYS)
+        return {key: copy.deepcopy(getattr(cls, key)) for key in keys}
+
+    @classmethod
+    def restore(cls, snapshot: Dict[str, Any]) -> None:
+        """إعادة الإعدادات إلى لقطة سابقة"""
+        for key, value in snapshot.items():
+            setattr(cls, key, copy.deepcopy(value))
+        cls.unknown_keys = []
+        cls.coerced_keys = []
 
     @classmethod
     def init_dirs(cls):
@@ -226,11 +254,14 @@ class Config:
         """تصحيح القيم المستحيلة بهدوء بدل السقوط لاحقاً في منتصف دورة مراقبة"""
         logger = logging.getLogger(__name__)
 
+        cls.coerced_keys = []
+
         def _clamp(attr: str, minimum, default):
             value = getattr(cls, attr)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or value < minimum:
                 logger.warning("قيمة غير صالحة لـ %s (%r) — أُعيدت إلى %r", attr, value, default)
                 setattr(cls, attr, default)
+                cls.coerced_keys.append(attr.lower())
 
         _clamp("ALERT_THRESHOLD", 1, 2)
         _clamp("ALERT_COOLDOWN_HOURS", 0, 24)
@@ -252,13 +283,28 @@ class Config:
         if not isinstance(cls.LLM_MIN_CONFIDENCE, (int, float)) or not 0.0 <= cls.LLM_MIN_CONFIDENCE <= 1.0:
             logger.warning("llm_min_confidence يجب أن تكون بين 0 و 1 — أُعيدت إلى 0.8")
             cls.LLM_MIN_CONFIDENCE = 0.8
+            cls.coerced_keys.append("llm_min_confidence")
+
+        # المفاتيح النصية: JSON يسمح بأي نوع، والخطأ الأشيع كتابة معرّف رقمي بلا
+        # علامتي تنصيص ("telegram_chat_id": 123456). بلا هذا التحويل يسقط الأمر
+        # بـ AttributeError، أو تتوقف التنبيهات بصمت لأن subprocess يرفض وسيطاً غير نصي.
+        for attr in cls._STR_KEYS:
+            value = getattr(cls, attr)
+            if isinstance(value, str):
+                continue
+            replacement = "" if value is None or isinstance(value, (list, dict, bool)) else str(value)
+            logger.warning("قيمة %s يجب أن تكون نصاً (%r) — استُخدم %r بدلاً عنها", attr, value, replacement)
+            setattr(cls, attr, replacement)
+            cls.coerced_keys.append(attr.lower())
 
         if not isinstance(cls.NOTIFIERS, list):
             logger.warning("notifiers يجب أن تكون قائمة — أُهملت")
             cls.NOTIFIERS = []
+            cls.coerced_keys.append("notifiers")
         if not isinstance(cls.QUIET_HOURS, dict):
             logger.warning("quiet_hours يجب أن تكون كائناً — أُهملت")
             cls.QUIET_HOURS = {}
+            cls.coerced_keys.append("quiet_hours")
 
 
 def _chmod_quiet(path: Path, mode: int) -> None:
@@ -270,9 +316,22 @@ def _chmod_quiet(path: Path, mode: int) -> None:
 
 
 def write_secure(path: Path, text: str) -> None:
-    """كتابة ملف بأذونات 0600 — قد يحوي حمولات مهام فيها أسرار"""
+    """كتابة ملف بأذونات 0600 — قد يحوي حمولات مهام فيها أسرار.
+
+    الملف يُخلق بأذوناته النهائية عبر ``os.open`` بدل الكتابة ثم ``chmod``:
+    الترتيب القديم كان يترك نافذة قصيرة يوجد فيها الملف بأذونات ``umask``.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    except (OSError, NotImplementedError, AttributeError):
+        # أنظمة لا تدعم الأعلام أو الأذونات — نكتب ثم نضبط ما أمكن
+        path.write_text(text, encoding="utf-8")
+        _chmod_quiet(path, FILE_MODE)
+        return
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    # ملف موجود مسبقاً لا يتأثر بأذونات os.open، فنضبطها صراحةً
     _chmod_quiet(path, FILE_MODE)
 
 

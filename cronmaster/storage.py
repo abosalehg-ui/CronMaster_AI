@@ -8,9 +8,9 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .config import FILE_MODE, Config, _chmod_quiet
+from .config import FILE_MODE, Config, _chmod_quiet, write_secure
 from .models import Job
 
 STATE_SCHEMA_VERSION = 2
@@ -55,7 +55,7 @@ class StateManager:
                 if isinstance(loaded, dict):
                     state.update(loaded)
             except (OSError, json.JSONDecodeError) as e:
-                self.logger.warning(f"ملف الحالة تالف أو غير مقروء ({e}) — سيبدأ بحالة جديدة")
+                self.logger.warning("ملف الحالة تالف أو غير مقروء (%s) — سيبدأ بحالة جديدة", e)
         return self._migrate(state)
 
     def _migrate(self, state: dict) -> dict:
@@ -78,8 +78,8 @@ class StateManager:
         self.state["last_run"] = datetime.now().isoformat()
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_file = self.state_file.with_suffix(".json.tmp")
-        tmp_file.write_text(json.dumps(self.state, indent=2, ensure_ascii=False), encoding="utf-8")
-        _chmod_quiet(tmp_file, FILE_MODE)
+        # الملف المؤقت يُخلق بأذوناته النهائية قبل أن يُكتب فيه شيء
+        write_secure(tmp_file, json.dumps(self.state, indent=2, ensure_ascii=False))
         os.replace(tmp_file, self.state_file)
 
     def record_fix(self, job_id: str, fix_type: str, details: str):
@@ -94,7 +94,8 @@ class StateManager:
         )
         # الاحتفاظ بآخر 100 إصلاح
         self.state["fixes_applied"] = self.state["fixes_applied"][-100:]
-        self.save()
+        # لا حفظ هنا: الحفظ يجري مرة واحدة في نهاية الدورة. الكتابة عند كل إصلاح
+        # كانت تُسلسل الحالة كاملة وتستبدل الملف N مرة في الدورة الواحدة.
 
     # ---- تهدئة التنبيهات (dedup) ----
 
@@ -357,53 +358,68 @@ class HistoryStore:
         """
         return job.last_run_at.isoformat() if job.last_run_at else ""
 
-    def record_observation(self, job: Job, error_type: Optional[str] = None) -> bool:
-        """تسجيل ملاحظة واحدة لمهمة. يعيد True إن أُدرج صف جديد."""
-        if not self.available or self._conn is None:
-            return False
-        try:
-            cursor = self._conn.execute(
-                "INSERT OR IGNORE INTO runs "
-                "(job_id, job_name, observed_at, run_key, status, error_type, "
-                " consecutive_errors, duration_seconds, timeout_seconds) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    job.id,
-                    job.name,
-                    datetime.now().isoformat(),
-                    self._run_key(job),
-                    job.last_status,
-                    error_type,
-                    job.consecutive_errors,
-                    job.last_duration_seconds,
-                    job.timeout_seconds,
-                ),
+    _INSERT_RUN = (
+        "INSERT OR IGNORE INTO runs "
+        "(job_id, job_name, observed_at, run_key, status, error_type, "
+        " consecutive_errors, duration_seconds, timeout_seconds) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+
+    def _insert_runs(self, items: List[Tuple[Job, Optional[str]]]) -> int:
+        """إدراج الملاحظات في **معاملة واحدة**.
+
+        كل ``commit`` في SQLite عملية fsync على القرص؛ الإدراج صفاً صفاً بـ commit
+        لكل صف كان يعني عشرات المزامنات في الدورة الواحدة، والمطلوب واحدة.
+        """
+        if not self.available or self._conn is None or not items:
+            return 0
+        observed_at = datetime.now().isoformat()
+        rows = [
+            (
+                job.id,
+                job.name,
+                observed_at,
+                self._run_key(job),
+                job.last_status,
+                error_type,
+                job.consecutive_errors,
+                job.last_duration_seconds,
+                job.timeout_seconds,
             )
-            self._conn.commit()
-            return cursor.rowcount > 0
+            for job, error_type in items
+        ]
+        try:
+            with self._conn:  # معاملة واحدة: commit عند النجاح وrollback عند الفشل
+                cursor = self._conn.executemany(self._INSERT_RUN, rows)
+            return max(0, cursor.rowcount or 0)
         except sqlite3.Error as e:
             self._disable(e)
-            return False
+            return 0
+
+    def record_observation(self, job: Job, error_type: Optional[str] = None) -> bool:
+        """تسجيل ملاحظة واحدة لمهمة. يعيد True إن أُدرج صف جديد."""
+        return self._insert_runs([(job, error_type)]) > 0
 
     def record_cycle(self, jobs: List[Job], error_types: Optional[Dict[str, str]] = None) -> int:
         """تسجيل دورة مراقبة كاملة: صف لكل مهمة مفعّلة. يعيد عدد الصفوف الجديدة."""
         error_types = error_types or {}
-        inserted = 0
-        for job in jobs:
-            if not job.enabled:
-                continue
-            if self.record_observation(job, error_types.get(job.id)):
-                inserted += 1
-        return inserted
+        return self._insert_runs([(job, error_types.get(job.id)) for job in jobs if job.enabled])
 
     # ------------------------------------------------------------
     # الاستعلامات المشتقة
     # ------------------------------------------------------------
 
+    #: أكبر نافذة تحتاجها المقاييس المشتقة من الصفوف الأخيرة (التذبذب 50، المدد 40)
+    RECENT_WINDOW = 50
+
     def _rows(self, job_id: str, since: Optional[datetime] = None, limit: Optional[int] = None) -> List[sqlite3.Row]:
+        """صفوف مهمة، الأحدث أولاً. تُنتقى الأعمدة المستخدمة فقط لا ``SELECT *``."""
         if not self.available or self._conn is None:
             return []
-        query = "SELECT * FROM runs WHERE job_id = ?"
+        query = (
+            "SELECT job_id, job_name, observed_at, status, error_type, "
+            "consecutive_errors, duration_seconds, timeout_seconds FROM runs WHERE job_id = ?"
+        )
         params: List[Any] = [job_id]
         if since is not None:
             query += " AND observed_at >= ?"
@@ -418,6 +434,16 @@ class HistoryStore:
             self._disable(e)
             return []
 
+    def _scalar_row(self, query: str, params: Iterable[Any]) -> Optional[sqlite3.Row]:
+        """تنفيذ استعلام تجميعي يعيد صفاً واحداً، أو None عند التعطّل"""
+        if not self.available or self._conn is None:
+            return None
+        try:
+            return self._conn.execute(query, list(params)).fetchone()
+        except sqlite3.Error as e:
+            self._disable(e)
+            return None
+
     def job_ids(self) -> List[str]:
         if not self.available or self._conn is None:
             return []
@@ -428,29 +454,50 @@ class HistoryStore:
             return []
 
     def run_count(self, job_id: str, since: Optional[datetime] = None) -> int:
-        return len(self._rows(job_id, since))
+        """عدد الملاحظات — يُحسب في SQL بلا تحميل الصفوف إلى الذاكرة"""
+        query = "SELECT COUNT(*) AS n FROM runs WHERE job_id = ?"
+        params: List[Any] = [job_id]
+        if since is not None:
+            query += " AND observed_at >= ?"
+            params.append(since.isoformat())
+        row = self._scalar_row(query, params)
+        return int(row["n"]) if row else 0
 
     def success_rate(self, job_id: str, since: Optional[datetime] = None) -> Optional[float]:
         """نسبة التشغيلات الناجحة (0..1) بين التشغيلات ذات الحالة المعروفة"""
-        rows = [r for r in self._rows(job_id, since) if r["status"]]
-        if not rows:
+        query = (
+            "SELECT COUNT(*) AS known, SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS ok "
+            "FROM runs WHERE job_id = ? AND status IS NOT NULL"
+        )
+        params: List[Any] = [job_id]
+        if since is not None:
+            query += " AND observed_at >= ?"
+            params.append(since.isoformat())
+        row = self._scalar_row(query, params)
+        if row is None or not row["known"]:
             return None
-        ok = sum(1 for r in rows if r["status"] == "ok")
-        return ok / len(rows)
+        return (row["ok"] or 0) / row["known"]
+
+    @staticmethod
+    def _flakiness_from(rows: Iterable[sqlite3.Row]) -> Optional[float]:
+        known = [r for r in rows if r["status"]]
+        if not known:
+            return None
+        return sum(1 for r in known if r["status"] == "error") / len(known)
 
     def flakiness_score(self, job_id: str, window: int = 50) -> Optional[float]:
         """نسبة التشغيلات الفاشلة ضمن آخر ``window`` ملاحظة (0..1)"""
-        rows = [r for r in self._rows(job_id, limit=window) if r["status"]]
-        if not rows:
-            return None
-        failed = sum(1 for r in rows if r["status"] == "error")
-        return failed / len(rows)
+        return self._flakiness_from(self._rows(job_id, limit=window))
+
+    @staticmethod
+    def _durations_from(rows: Iterable[sqlite3.Row], window: int = 40) -> List[float]:
+        recent = list(rows)[:window]
+        values = [r["duration_seconds"] for r in recent if r["duration_seconds"] is not None]
+        return list(reversed(values))
 
     def durations(self, job_id: str, window: int = 40) -> List[float]:
         """مدد آخر التشغيلات، من الأقدم إلى الأحدث"""
-        rows = self._rows(job_id, limit=window)
-        values = [r["duration_seconds"] for r in rows if r["duration_seconds"] is not None]
-        return list(reversed(values))
+        return self._durations_from(self._rows(job_id, limit=window), window)
 
     def duration_trend(self, job_id: str, window: int = 40) -> Dict[str, Any]:
         """مقارنة متوسط النصف الأحدث بمتوسط النصف الأقدم لكشف التدهور.
@@ -458,7 +505,11 @@ class HistoryStore:
         يعيد قاموساً فيه المتوسطان والنسبة وعدد العينات — بما يكفي ليقرر
         المستدعي إن كان هناك تدهور يستحق تنبيهاً مبكراً.
         """
-        values = self.durations(job_id, window)
+        return self._trend_from(self.durations(job_id, window))
+
+    @staticmethod
+    def _trend_from(values: List[float]) -> Dict[str, Any]:
+        """حساب الاتجاه من مدد جاهزة — يفصل الحساب عن الاستعلام فيُعاد استخدامه"""
         result: Dict[str, Any] = {
             "samples": len(values),
             "baseline_mean": None,
@@ -483,13 +534,12 @@ class HistoryStore:
         result["ratio"] = (recent_mean / baseline_mean) if baseline_mean > 0 else None
         return result
 
-    def mean_time_between_failures(self, job_id: str) -> Optional[float]:
-        """متوسط الزمن بالثواني بين حالات الفشل المسجلة"""
-        rows = [r for r in self._rows(job_id) if r["status"] == "error"]
-        if len(rows) < 2:
-            return None
+    @staticmethod
+    def _mtbf_from(rows: Iterable[sqlite3.Row]) -> Optional[float]:
         stamps = []
         for row in rows:
+            if row["status"] != "error":
+                continue
             try:
                 stamps.append(datetime.fromisoformat(row["observed_at"]))
             except (ValueError, TypeError):
@@ -499,6 +549,14 @@ class HistoryStore:
         stamps.sort()
         gaps = [(b - a).total_seconds() for a, b in zip(stamps, stamps[1:])]
         return sum(gaps) / len(gaps)
+
+    def mean_time_between_failures(self, job_id: str, window: Optional[int] = None) -> Optional[float]:
+        """متوسط الزمن بالثواني بين حالات الفشل ضمن آخر ``window`` ملاحظة.
+
+        كانت تسحب كل صفوف المهمة بلا حد: مع احتفاظ 90 يوماً ودورة كل خمس دقائق
+        يعني ذلك عشرات آلاف الصفوف تُقرأ وتُحوَّل في الذاكرة لحساب رقم واحد.
+        """
+        return self._mtbf_from(self._rows(job_id, limit=window or self.RECENT_WINDOW))
 
     def daily_success_rates(self, job_id: Optional[str] = None, days: int = 30) -> List[Dict[str, Any]]:
         """نسبة النجاح اليومية — تُستخدم في رسم اتجاه تقرير HTML"""
@@ -524,23 +582,64 @@ class HistoryStore:
         return [{"day": r["day"], "rate": (r["ok"] / r["total"]) if r["total"] else 0.0, "total": r["total"]}
                 for r in rows]
 
-    def job_summary(self, job_id: str, days: int) -> Dict[str, Any]:
-        """ملخص جاهز للعرض في stats وتقرير HTML"""
-        since = datetime.now() - timedelta(days=days)
-        trend = self.duration_trend(job_id)
-        rows = self._rows(job_id, since)
-        name = rows[0]["job_name"] if rows else job_id
+    def window_aggregates(self, days: int) -> Dict[str, Dict[str, Any]]:
+        """عدد التشغيلات ونسبة النجاح لكل المهام في **استعلام تجميعي واحد**"""
+        if not self.available or self._conn is None:
+            return {}
+        since = (datetime.now() - timedelta(days=days)).isoformat()
+        try:
+            rows = list(
+                self._conn.execute(
+                    "SELECT job_id, COUNT(*) AS runs, "
+                    "SUM(CASE WHEN status IS NOT NULL THEN 1 ELSE 0 END) AS known, "
+                    "SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS ok "
+                    "FROM runs WHERE observed_at >= ? GROUP BY job_id",
+                    (since,),
+                )
+            )
+        except sqlite3.Error as e:
+            self._disable(e)
+            return {}
         return {
-            "job_id": job_id,
-            "job_name": name,
-            "runs": len(rows),
-            "success_rate": self.success_rate(job_id, since),
-            "flakiness": self.flakiness_score(job_id),
-            "avg_duration": trend["overall_mean"],
-            "duration_ratio": trend["ratio"],
-            "samples": trend["samples"],
-            "mtbf_seconds": self.mean_time_between_failures(job_id),
+            r["job_id"]: {
+                "runs": r["runs"] or 0,
+                "success_rate": ((r["ok"] or 0) / r["known"]) if r["known"] else None,
+            }
+            for r in rows
         }
+
+    def job_summaries(self, job_ids: Iterable[str], days: int) -> List[Dict[str, Any]]:
+        """ملخصات جاهزة للعرض لعدة مهام دفعة واحدة.
+
+        كانت كل مهمة تكلّف خمسة استعلامات مستقلة على الجدول نفسه (تجميع النافذة،
+        نسبة النجاح، التذبذب، المدد، ومتوسط الزمن بين الأعطال)، فيصير ``stats``
+        وتقرير HTML عمليتَي N+1. هنا: استعلام تجميعي واحد لكل المهام، ثم استعلام
+        واحد **مسقوف** لكل مهمة يغذّي المقاييس المشتقة من الصفوف الأخيرة.
+        """
+        aggregates = self.window_aggregates(days)
+        summaries = []
+        for job_id in job_ids:
+            recent = self._rows(job_id, limit=self.RECENT_WINDOW)
+            trend = self._trend_from(self._durations_from(recent))
+            window = aggregates.get(job_id, {})
+            summaries.append(
+                {
+                    "job_id": job_id,
+                    "job_name": recent[0]["job_name"] if recent else job_id,
+                    "runs": window.get("runs", 0),
+                    "success_rate": window.get("success_rate"),
+                    "flakiness": self._flakiness_from(recent),
+                    "avg_duration": trend["overall_mean"],
+                    "duration_ratio": trend["ratio"],
+                    "samples": trend["samples"],
+                    "mtbf_seconds": self._mtbf_from(recent),
+                }
+            )
+        return summaries
+
+    def job_summary(self, job_id: str, days: int) -> Dict[str, Any]:
+        """ملخص مهمة واحدة — غلاف رفيع حول ``job_summaries``"""
+        return self.job_summaries([job_id], days)[0]
 
     # ------------------------------------------------------------
     # الصيانة

@@ -48,10 +48,22 @@ section {
 .tile .n { font-size: 1.6rem; font-weight: 600; display: block; }
 .tile .l { color: var(--muted); font-size: .8rem; }
 .scroll { overflow-x: auto; max-width: 100%; }
-table { border-collapse: collapse; width: 100%; min-width: 40rem; font-size: .9rem; }
+table { border-collapse: collapse; width: 100%; min-width: 34rem; font-size: .9rem; }
 th, td { padding: .45rem .6rem; border-bottom: 1px solid var(--line); text-align: start; white-space: nowrap; }
 th { color: var(--muted); font-weight: 600; font-size: .8rem; }
 tr:last-child td { border-bottom: 0; }
+/* الأعمدة النصية الطويلة تلتف؛ الأرقام والجدولة تبقى بلا التفاف حتى لا تتشوه */
+td.wrap, th.wrap { white-space: normal; min-width: 9rem; }
+caption { caption-side: top; text-align: start; color: var(--muted); font-size: .8rem; padding-bottom: .4rem; }
+/* على الشاشات الضيقة يتحول كل صف إلى بطاقة بدل تمرير أفقي لجدول كامل */
+@media (max-width: 34rem) {
+  table { min-width: 0; }
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  tr { display: block; border: 1px solid var(--line); border-radius: 8px; margin-bottom: .6rem; padding: .3rem .5rem; }
+  td { display: flex; justify-content: space-between; gap: 1rem; padding: .25rem 0; }
+  td { white-space: normal; border-bottom: 0; }
+  td::before { content: attr(data-label); color: var(--muted); font-size: .8rem; }
+}
 .ok { color: var(--ok); } .err { color: var(--err); } .warn { color: var(--warn); }
 .muted { color: var(--muted); }
 .empty { color: var(--muted); font-style: italic; }
@@ -179,32 +191,53 @@ def _status_cell(job: Job) -> str:
     return f'<span class="muted">{_e(job.last_status or "—")}</span>'
 
 
+def _head(headers: List[str], wrap: Optional[List[int]] = None) -> str:
+    """صف رؤوس بـ ``scope="col"`` حتى يربط قارئ الشاشة كل خلية برأسها"""
+    wrap = set(wrap or [])
+    cells = []
+    for index, header in enumerate(headers):
+        classes = ' class="wrap"' if index in wrap else ""
+        cells.append(f'<th scope="col"{classes}>{_e(header)}</th>')
+    return "".join(cells)
+
+
+def _cell(value: str, label: str, wrap: bool = False) -> str:
+    """خلية تحمل اسم عمودها في ``data-label`` ليظهر في تخطيط البطاقات على الجوال"""
+    classes = ' class="wrap"' if wrap else ""
+    return f'<td data-label="{_e(label)}"{classes}>{value}</td>'
+
+
+def _table(caption: str, head: str, body: str) -> str:
+    return (
+        f'<div class="scroll"><table><caption>{_e(caption)}</caption>'
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    )
+
+
 def _jobs_table(jobs: List[Job], stats: List[Dict[str, Any]]) -> str:
     by_id = {s["job_id"]: s for s in stats}
     headers = [
         t("html.col_job"), t("html.col_status"), t("html.col_schedule"),
         t("html.col_success"), t("html.col_flaky"), t("html.col_runs"), t("html.col_duration"),
     ]
-    head = "".join(f"<th>{_e(h)}</th>" for h in headers)
 
     body = []
     for job in jobs:
         s = by_id.get(job.id, {})
-        body.append(
-            "<tr>"
-            f"<td>{_e(job.name)}</td>"
-            f"<td>{_status_cell(job)}</td>"
-            f"<td><code>{_e(job.schedule)}</code></td>"
-            f"<td>{_pct(s.get('success_rate'))}</td>"
-            f"<td>{_pct(s.get('flakiness'))}</td>"
-            f"<td>{_e(s.get('runs', 0))}</td>"
-            f"<td>{_secs(s.get('avg_duration'))}</td>"
-            "</tr>"
-        )
+        cells = [
+            _cell(_e(job.name), headers[0], wrap=True),
+            _cell(_status_cell(job), headers[1]),
+            _cell(f"<code>{_e(job.schedule)}</code>", headers[2]),
+            _cell(_pct(s.get("success_rate")), headers[3]),
+            _cell(_pct(s.get("flakiness")), headers[4]),
+            _cell(_e(s.get("runs", 0)), headers[5]),
+            _cell(_secs(s.get("avg_duration")), headers[6]),
+        ]
+        body.append(f"<tr>{''.join(cells)}</tr>")
 
     if not body:
         return f'<p class="empty">{_e(t("html.no_data"))}</p>'
-    return f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+    return _table(t("html.jobs_table"), _head(headers, wrap=[0]), "".join(body))
 
 
 def _history_table(history: Dict[str, Any]) -> str:
@@ -219,12 +252,16 @@ def _history_table(history: Dict[str, Any]) -> str:
         return f'<p class="empty">{_e(t("html.no_data"))}</p>'
 
     rows.sort(key=lambda r: r[0], reverse=True)
-    head = "".join(f"<th>{_e(h)}</th>" for h in (t("html.col_time"), t("html.col_kind"), t("html.col_details")))
+    headers = [t("html.col_time"), t("html.col_kind"), t("html.col_details")]
     body = "".join(
-        f"<tr><td>{_e(ts[:19].replace('T', ' '))}</td><td>{_e(kind)}</td><td>{_e(details)}</td></tr>"
+        "<tr>"
+        + _cell(_e(ts[:19].replace("T", " ")), headers[0])
+        + _cell(_e(kind), headers[1])
+        + _cell(_e(details), headers[2], wrap=True)
+        + "</tr>"
         for ts, kind, details in rows[:40]
     )
-    return f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+    return _table(t("html.history"), _head(headers, wrap=[2]), body)
 
 
 # ============================================================

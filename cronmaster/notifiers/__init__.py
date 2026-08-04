@@ -48,7 +48,14 @@ def build_notifiers(specs: Optional[List[Dict[str, Any]]] = None, telegram_chat_
             elif cls is NullNotifier:
                 notifiers.append(NullNotifier())
             else:
-                notifiers.append(cls(url=spec.get("url", ""), field=spec.get("field"), headers=spec.get("headers")))
+                notifiers.append(
+                    cls(
+                        url=spec.get("url", ""),
+                        field=spec.get("field"),
+                        headers=spec.get("headers"),
+                        allow_insecure=spec.get("allow_insecure"),
+                    )
+                )
         except (TypeError, ValueError) as e:
             logger.warning("تعذر بناء قناة %s: %s", kind, e)
 
