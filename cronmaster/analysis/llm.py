@@ -94,6 +94,8 @@ _SECRET_PATTERNS = [
         r"(?i)\b(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|password|passwd|pwd|"
         r"authorization|bearer|client[_-]?secret|private[_-]?key|session[_-]?id)\b"
         r"(\s*[=:]\s*|\s+)"
+        # سابقة مخطط المصادقة (Bearer/Basic/Token) ليست هي السر، فلا تُحجب بدلاً عنه
+        r"((?:bearer|basic|token|digest)\s+)?"
         r"(\"[^\"]*\"|'[^']*'|\S+)"
     ),
     # معاملات حساسة داخل عناوين URL
@@ -116,7 +118,7 @@ def redact(text: str) -> str:
     """
     if not text:
         return ""
-    redacted = _SECRET_PATTERNS[0].sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
+    redacted = _SECRET_PATTERNS[0].sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3) or ''}{REDACTED}", text)
     redacted = _SECRET_PATTERNS[1].sub(lambda m: f"{m.group(1)}{REDACTED}", redacted)
     redacted = _SECRET_PATTERNS[2].sub(lambda m: f"{m.group(1)}{REDACTED}@", redacted)
     for pattern in _SECRET_PATTERNS[3:]:

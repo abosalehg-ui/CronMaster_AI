@@ -10,6 +10,7 @@ import html
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from .. import format as fmt
 from ..i18n import get_lang, t
 from ..models import FailureAnalysis, Job
 
@@ -77,12 +78,9 @@ def _e(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
-def _pct(value: Optional[float]) -> str:
-    return "—" if value is None else f"{value * 100:.0f}%"
-
-
-def _secs(value: Optional[float]) -> str:
-    return "—" if value is None else f"{value:.1f}s"
+#: أسماء محلية مختصرة — التعريف الوحيد يعيش في ``cronmaster.format``
+_pct = fmt.pct
+_secs = fmt.secs
 
 
 # ============================================================

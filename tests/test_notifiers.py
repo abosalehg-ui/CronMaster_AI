@@ -291,3 +291,49 @@ def test_queue_is_bounded(state):
     for i in range(80):
         state.queue_alert(f"تنبيه {i}")
     assert len(state.peek_queued_alerts()) == 50
+
+
+# ============================================================
+# مسارات فشل Telegram (كانت غير مغطاة)
+# ============================================================
+
+
+def _stub_openclaw(monkeypatch, *, returncode=0, stderr="", raises=None):
+    import cronmaster.backends.openclaw as openclaw
+
+    class Result:
+        def __init__(self):
+            self.returncode, self.stderr, self.stdout = returncode, stderr, ""
+
+    def run(*args, **kwargs):
+        if raises is not None:
+            raise raises
+        return Result()
+
+    monkeypatch.setattr(openclaw, "run_openclaw", run)
+
+
+def test_telegram_sends_with_chat_id(sandbox, monkeypatch):
+    _stub_openclaw(monkeypatch)
+    assert TelegramNotifier(chat_id="123").send("مرحباً") is True
+
+
+def test_telegram_reports_backend_failure(sandbox, monkeypatch):
+    _stub_openclaw(monkeypatch, returncode=1, stderr="chat not found")
+    assert TelegramNotifier(chat_id="123").send("مرحباً") is False
+
+
+def test_telegram_survives_openclaw_error(sandbox, monkeypatch):
+    import cronmaster.backends.openclaw as openclaw
+
+    _stub_openclaw(monkeypatch, raises=openclaw.OpenClawError("غير مثبت"))
+    assert TelegramNotifier(chat_id="123").send("مرحباً") is False
+
+
+def test_telegram_without_chat_id_does_not_send(sandbox, monkeypatch):
+    calls = []
+    import cronmaster.backends.openclaw as openclaw
+
+    monkeypatch.setattr(openclaw, "run_openclaw", lambda *a, **k: calls.append(a))
+    assert TelegramNotifier(chat_id="").send("مرحباً") is False
+    assert calls == []

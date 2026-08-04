@@ -20,32 +20,34 @@ from cronmaster.models import Job
 # ============================================================
 
 
+@pytest.fixture(autouse=True)
+def _isolate_config():
+    """إعادة كل إعداد إلى ما كان عليه بعد كل اختبار.
+
+    اللقطة مشتقة من ``configurable_keys`` لا من قائمة مكتوبة يدوياً، فأي إعداد
+    جديد يدخلها تلقائياً — كانت القائمة اليدوية تعني أن نسيان تسجيل مفتاح جديد
+    يُسرّب حالته بين الاختبارات بصمت.
+    """
+    snapshot = Config.snapshot()
+    yield
+    Config.restore(snapshot)
+
+
 @pytest.fixture
-def sandbox(tmp_path, monkeypatch):
+def sandbox(tmp_path):
     """عزل كل مسارات Config وإعداداتها القابلة للتعديل عن جهاز المطور"""
-    monkeypatch.setattr(Config, "WORK_DIR", tmp_path)
-    monkeypatch.setattr(Config, "BACKUP_DIR", tmp_path / "backups")
-    monkeypatch.setattr(Config, "REPORTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(Config, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(Config, "CONFIG_FILE", tmp_path / "config.json")
+    Config.WORK_DIR = tmp_path
+    Config.BACKUP_DIR = tmp_path / "backups"
+    Config.REPORTS_DIR = tmp_path / "reports"
+    Config.STATE_FILE = tmp_path / "state.json"
+    Config.CONFIG_FILE = tmp_path / "config.json"
 
-    # إعدادات قد تُعدّلها الاختبارات — نُعيدها إلى قيمها الافتراضية بعد كل اختبار
-    for attr in (
-        "NOTIFIERS", "QUIET_HOURS", "TELEGRAM_CHAT_ID", "HEALTHCHECK_PING_URL",
-        "PROMETHEUS_TEXTFILE", "LLM_ENABLED", "LLM_MIN_CONFIDENCE", "LLM_CACHE_DAYS",
-        "HISTORY_ENABLED", "CIRCUIT_BREAKER_ENABLED", "CIRCUIT_BREAKER_THRESHOLD",
-        "ROLLBACK_TIMEOUT_ENABLED", "ROLLBACK_AFTER_CYCLES", "AUTO_RESCHEDULE",
-        "MAX_TIMEOUT_FIXES", "DURATION_REGRESSION_FACTOR", "DURATION_REGRESSION_MIN_SAMPLES",
-        "BACKEND", "LANG", "ALERT_THRESHOLD",
-    ):
-        monkeypatch.setattr(Config, attr, getattr(Config, attr))
-
-    monkeypatch.setattr(Config, "NOTIFIERS", [])
-    monkeypatch.setattr(Config, "QUIET_HOURS", {})
-    monkeypatch.setattr(Config, "TELEGRAM_CHAT_ID", "")
-    monkeypatch.setattr(Config, "HEALTHCHECK_PING_URL", "")
-    monkeypatch.setattr(Config, "PROMETHEUS_TEXTFILE", "")
-    monkeypatch.setattr(Config, "LLM_ENABLED", False)
+    Config.NOTIFIERS = []
+    Config.QUIET_HOURS = {}
+    Config.TELEGRAM_CHAT_ID = ""
+    Config.HEALTHCHECK_PING_URL = ""
+    Config.PROMETHEUS_TEXTFILE = ""
+    Config.LLM_ENABLED = False
     return tmp_path
 
 
