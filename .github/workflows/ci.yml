@@ -27,6 +27,20 @@ jobs:
           python3 CronMaster_AI.py --version
           python3 -c "import CronMaster_AI, cronmaster; print(cronmaster.__version__)"
 
+  # المسار الاختياري: المصنّف الذكي مع نسخة SDK حقيقية مثبّتة من قيد pyproject.
+  # الاختبارات العادية تستبدل الحزمة بوحدة مزيفة، فهذا وحده يكشف عدم توافق التوقيع.
+  ai-extra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with the ai extra
+        run: pip install ".[ai]" pytest
+      - name: LLM tests against the real SDK
+        run: pytest -v tests/test_llm.py
+
   package:
     runs-on: ubuntu-latest
     steps:

@@ -12,6 +12,9 @@ class TelegramNotifier(Notifier):
     """إرسال تنبيه عبر ``openclaw message send``."""
 
     name = "telegram"
+    #: حد Telegram 4096 محرفاً؛ نترك هامشاً لعلامة القص. بلا سقف كان ملخص فترة هدوء
+    #: طويل يفشل إرساله فيبقى الطابور معلّقاً لأن flush_digest لا يفرغه إلا بعد النجاح.
+    MAX_LENGTH = 4000
 
     def __init__(self, chat_id: Optional[str] = None):
         super().__init__()
@@ -34,6 +37,11 @@ class TelegramNotifier(Notifier):
             )
             return False
 
+        if len(message) > self.MAX_LENGTH:
+            message = message[: self.MAX_LENGTH - 1] + "…"
+
+        # ملاحظة: النص يمر كوسيط سطر أوامر لأن هذا ما يقبله ``openclaw message send``،
+        # فيظهر لحظياً في ``ps`` لمستخدمي الجهاز نفسه. القص أعلاه يحدّ الحجم على الأقل.
         try:
             result = _openclaw.run_openclaw(
                 "message", "send",

@@ -223,10 +223,14 @@ class AutoFixer:
 
 
 def shift_cron_expression(expr: str, minutes: int) -> Optional[str]:
-    """إزاحة حقل الدقائق في تعبير cron بمقدار ``minutes``.
+    """تأخير تعبير cron بمقدار ``minutes`` دقيقة (0 < minutes < 60).
 
-    يعيد None إذا كان التعبير غير قياسي (مثل ``@daily``) أو حقل الدقائق
-    ليس رقماً أو قائمة أرقام — لا نخمّن في جدولة المستخدم.
+    يعيد None إذا كان التعبير غير قياسي (مثل ``@daily``)، أو حقل الدقائق ليس
+    رقماً أو قائمة أرقام، أو كانت الإزاحة تعبر حد الساعة وحقل الساعة ليس رقماً
+    مفرداً — لا نخمّن في جدولة المستخدم.
+
+    عبور حد الساعة يُحمَل إلى حقل الساعة: ``50 3`` + 17 = ``7 4``. الالتفاف على
+    الدقائق وحدها كان يعطي ``7 3``، أي تقديم المهمة 43 دقيقة بدل تأخيرها 17.
     """
     if not expr or expr.startswith("@"):
         return None
@@ -234,15 +238,25 @@ def shift_cron_expression(expr: str, minutes: int) -> Optional[str]:
     if len(parts) < 5:
         return None
 
-    minute_field = parts[0]
-    if minute_field == "*":
+    minute_field, hour_field = parts[0], parts[1]
+    if minute_field == "*" or not 0 < minutes < 60:
         return None
 
-    shifted = []
-    for token in minute_field.split(","):
-        if not token.isdigit():
-            return None
-        shifted.append(str((int(token) + minutes) % 60))
+    tokens = minute_field.split(",")
+    if not all(token.isdigit() for token in tokens):
+        return None
+    shifted = [int(token) + minutes for token in tokens]
+    wraps = [value >= 60 for value in shifted]
 
-    parts[0] = ",".join(shifted)
+    if any(wraps) and hour_field != "*":
+        # كل ساعة (``*``): الدقيقة 7 من الساعة التالية هي نفسها 50 + 17، فلا حمل.
+        # حمل إلى الساعة ممكن فقط حين تتحرك كل الدقائق معاً عبر الحد وفي ساعة واحدة معروفة؛
+        # وإلا لانقسمت المهمة على ساعتين ولم تعد قائمة الدقائق تعبّر عنها
+        if not all(wraps) or not hour_field.isdigit():
+            return None
+        if int(hour_field) == 23 and parts[2:5] != ["*", "*", "*"]:
+            return None  # العبور إلى يوم آخر يغيّر معنى قيود اليوم/الشهر
+        parts[1] = str((int(hour_field) + 1) % 24)
+
+    parts[0] = ",".join(str(value % 60) for value in shifted)
     return " ".join(parts)

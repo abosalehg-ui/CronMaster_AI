@@ -52,6 +52,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "html.title": "تقرير CronMaster",
         "html.summary": "الملخص الحالي",
         "html.jobs_table": "المهام",
+        "html.failures_table": "المهام الفاشلة وتشخيصها",
         "html.col_job": "المهمة",
         "html.col_status": "الحالة",
         "html.col_schedule": "الجدولة",
@@ -110,6 +111,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         # ---- القفل ----
         "lock.busy": "نسخة أخرى من CronMaster تعمل الآن — تم التخطي",
         "lock.stale": "قفل قديم من عملية منتهية (pid={pid}) — أُعيد استخدامه",
+        "lock.timeout": "❌ دورة مراقبة تعمل الآن ولم تنتهِ خلال {seconds} ثانية — أعد المحاولة بعد قليل",
         # ---- التنبيهات ----
         "alert.header": "🚨 تنبيه CronMaster",
         "alert.recovered": "💚 مهام تعافت:",
@@ -197,6 +199,62 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "cli.backend_error": "❌ تعذر التواصل مع الواجهة الخلفية: {error}",
         "cli.unknown_job": "المهمة غير موجودة",
         "cli.unexpected_error": "❌ خطأ غير متوقع: {error}\n   التفاصيل الكاملة في: {log}",
+        "cli.limit_positive": "يجب أن يكون عدداً صحيحاً موجباً: {value}",
+        # ---- تنبيهات أُضيفت في 3.2 ----
+        "alert.backend_failed": "🚨 CronMaster لا يستطيع قراءة المهام من {backend}:\n{error}",
+        "alert.job_crashed": "⚠️ تعذر تحليل المهمة {name} في هذه الدورة ({error}) — راجع سجل cronmaster.log",
+        "llm.low_confidence": "(ثقة منخفضة {value:.2f})",
+        # ---- تفاصيل doctor ----
+        "doctor.detail.jobs": "{count} مهمة",
+        "doctor.detail.no_config": "غير موجود — ستُستخدم القيم الافتراضية",
+        "doctor.detail.invalid_notifiers": " (غير مضبوطة: {names})",
+        "doctor.detail.no_notifiers": "لا توجد قنوات مضبوطة",
+        "doctor.detail.llm_not_ready": "غير جاهز (حزمة أو مفتاح ناقص)",
+        "doctor.detail.disabled": "معطّل",
+        # ---- نصوص --help ----
+        "help.description": "CronMaster_AI — مدير ذكي للمهام المجدولة (OpenClaw أو crontab)",
+        "help.epilog": (
+            "أمثلة:\n"
+            "  cronmaster monitor            # مراقبة وإصلاح تلقائي\n"
+            "  cronmaster monitor --dry-run  # عرض ما سيحدث دون تنفيذ\n"
+            "  cronmaster monitor --no-fix   # مراقبة بدون إصلاح\n"
+            "  cronmaster status             # حالة سريعة\n"
+            "  cronmaster report -f html     # تقرير HTML مكتفٍ بذاته\n"
+            "  cronmaster list               # قائمة المهام\n"
+            "  cronmaster fix <job_id>       # إصلاح مهمة محددة\n"
+            "  cronmaster history            # سجل الإصلاحات\n"
+            "  cronmaster stats              # إحصائيات من السجل التاريخي\n"
+            "  cronmaster restore <job_id>   # استعادة مهمة من نسخة احتياطية\n"
+            "  cronmaster doctor             # فحص ذاتي شامل\n"
+            "\n"
+            "أكواد خروج monitor: 0 سليم، 1 فشل المراقب، 2 مهام فاشلة، 3 طُبِّقت إصلاحات"
+        ),
+        "help.lang": "لغة المخرجات (افتراضي ar)",
+        "help.backend": "الواجهة الخلفية للمهام",
+        "help.commands": "الأوامر",
+        "help.monitor": "مراقبة وإصلاح",
+        "help.no_fix": "بدون إصلاح تلقائي",
+        "help.no_alert": "بدون تنبيهات",
+        "help.no_retry": "بدون إعادة تشغيل",
+        "help.dry_run": "عرض ما سيحدث دون أي تنفيذ",
+        "help.prometheus": "كتابة مقاييس Prometheus إلى ملف نصي",
+        "help.json": "مخرجات JSON بدل العرض البشري",
+        "help.status": "حالة سريعة",
+        "help.report": "توليد تقرير",
+        "help.format": "صيغة التقرير",
+        "help.list": "قائمة المهام",
+        "help.fix": "إصلاح مهمة",
+        "help.job_id": "معرف المهمة",
+        "help.history": "سجل الإصلاحات والتنبيهات",
+        "help.limit": "عدد السجلات (افتراضي 20)",
+        "help.stats": "إحصائيات من السجل التاريخي",
+        "help.stats_job": "مهمة واحدة بدل كل المهام",
+        "help.days": "نافذة الأيام (افتراضي مدة الاحتفاظ)",
+        "help.restore": "استعادة مهمة من نسخة احتياطية",
+        "help.backup": "ملف نسخة احتياطية محدد (داخل مجلد النسخ)",
+        "help.list_only": "عرض النسخ المتاحة فقط",
+        "help.yes": "بدون سؤال تأكيد",
+        "help.doctor": "فحص ذاتي شامل",
         "monitor.started": "بدء المراقبة...",
         "monitor.dry_run_suffix": " [dry-run]",
         "monitor.progress": "[{index}/{total}] تحليل: {name}",
@@ -235,6 +293,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "html.title": "CronMaster report",
         "html.summary": "Current summary",
         "html.jobs_table": "Jobs",
+        "html.failures_table": "Failing jobs and their diagnosis",
         "html.col_job": "Job",
         "html.col_status": "Status",
         "html.col_schedule": "Schedule",
@@ -289,6 +348,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "restore.outside_dir": "❌ The backup file must live inside {dir} — use --list to see what is available",
         "lock.busy": "Another CronMaster instance is running — skipping",
         "lock.stale": "Stale lock from a dead process (pid={pid}) — reclaimed",
+        "lock.timeout": "❌ A monitor cycle is running and did not finish within {seconds}s — try again shortly",
         "alert.header": "🚨 CronMaster alert",
         "alert.recovered": "💚 Recovered jobs:",
         "alert.silent": "😴 Enabled jobs that missed their schedule (check the scheduler):",
@@ -370,6 +430,59 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "cli.backend_error": "❌ Cannot reach the backend: {error}",
         "cli.unknown_job": "Job not found",
         "cli.unexpected_error": "❌ Unexpected error: {error}\n   Full details in: {log}",
+        "cli.limit_positive": "must be a positive integer: {value}",
+        "alert.backend_failed": "🚨 CronMaster cannot read jobs from {backend}:\n{error}",
+        "alert.job_crashed": "⚠️ Could not analyse job {name} this cycle ({error}) — see cronmaster.log",
+        "llm.low_confidence": "(low confidence {value:.2f})",
+        "doctor.detail.jobs": "{count} jobs",
+        "doctor.detail.no_config": "not found — defaults will be used",
+        "doctor.detail.invalid_notifiers": " (misconfigured: {names})",
+        "doctor.detail.no_notifiers": "no channels configured",
+        "doctor.detail.llm_not_ready": "not ready (package or API key missing)",
+        "doctor.detail.disabled": "disabled",
+        "help.description": "CronMaster_AI — smart manager for scheduled jobs (OpenClaw or crontab)",
+        "help.epilog": (
+            "Examples:\n"
+            "  cronmaster monitor            # monitor and auto-fix\n"
+            "  cronmaster monitor --dry-run  # show what would happen, change nothing\n"
+            "  cronmaster monitor --no-fix   # monitor without fixing\n"
+            "  cronmaster status             # quick status\n"
+            "  cronmaster report -f html     # self-contained HTML report\n"
+            "  cronmaster list               # list jobs\n"
+            "  cronmaster fix <job_id>       # fix one job\n"
+            "  cronmaster history            # fix history\n"
+            "  cronmaster stats              # statistics from the history store\n"
+            "  cronmaster restore <job_id>   # restore a job from a backup\n"
+            "  cronmaster doctor             # full self-check\n"
+            "\n"
+            "monitor exit codes: 0 healthy, 1 monitor failure, 2 failing jobs, 3 fixes applied"
+        ),
+        "help.lang": "output language (default ar)",
+        "help.backend": "job backend",
+        "help.commands": "commands",
+        "help.monitor": "monitor and fix",
+        "help.no_fix": "no automatic fixes",
+        "help.no_alert": "no alerts",
+        "help.no_retry": "no re-runs",
+        "help.dry_run": "show what would happen without changing anything",
+        "help.prometheus": "write Prometheus metrics to a textfile",
+        "help.json": "JSON output instead of the human view",
+        "help.status": "quick status",
+        "help.report": "generate a report",
+        "help.format": "report format",
+        "help.list": "list jobs",
+        "help.fix": "fix a job",
+        "help.job_id": "job id",
+        "help.history": "fix and alert history",
+        "help.limit": "number of records (default 20)",
+        "help.stats": "statistics from the history store",
+        "help.stats_job": "a single job instead of all",
+        "help.days": "window in days (default: retention period)",
+        "help.restore": "restore a job from a backup",
+        "help.backup": "a specific backup file (inside the backup directory)",
+        "help.list_only": "list available backups only",
+        "help.yes": "do not ask for confirmation",
+        "help.doctor": "full self-check",
         "monitor.progress": "[{index}/{total}] analysing: {name}",
         "monitor.started": "Monitoring started...",
         "monitor.dry_run_suffix": " [dry-run]",

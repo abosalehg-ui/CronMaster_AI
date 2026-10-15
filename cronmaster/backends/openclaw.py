@@ -74,13 +74,20 @@ class OpenClawBackend(CronBackend):
             raise OpenClawError(f"مخرجات openclaw ليست JSON صالحاً: {e}") from e
 
         # OpenClaw يرجع {"jobs": [...]} أو [...]
-        jobs_data = data.get("jobs", data) if isinstance(data, dict) else data
-        jobs = []
+        jobs_data = data.get("jobs") if isinstance(data, dict) else data
 
-        for job in jobs_data:
-            jobs.append(self._parse_job(job))
+        # شكل غير متوقع يجب أن يكون فشلاً صريحاً للواجهة الخلفية: بدون هذا الفحص كان
+        # {"items": []} يُكرَّر على مفاتيح القاموس فيرفع AttributeError، فيتجاوز مسار
+        # "المراقب لا يستطيع القراءة" (تنبيه حرج + نبضة /fail) كلياً.
+        if not isinstance(jobs_data, list) or not all(isinstance(job, dict) for job in jobs_data):
+            raise OpenClawError(
+                f"شكل مخرجات openclaw cron list غير متوقع: المتوقع قائمة مهام، وصل {type(jobs_data).__name__}"
+            )
 
-        return jobs
+        try:
+            return [self._parse_job(job) for job in jobs_data]
+        except (AttributeError, TypeError, ValueError) as e:
+            raise OpenClawError(f"تعريف مهمة غير متوقع في مخرجات openclaw: {e}") from e
 
     @staticmethod
     def _parse_job(job: Any) -> Job:

@@ -19,8 +19,8 @@ from conftest import failing_job
 
 VALID_VERDICT = {
     "error_type": "network_error",
-    "description_ar": "انقطاع مؤقت في الاتصال بالخدمة",
-    "suggested_fix_ar": "إعادة المحاولة بعد لحظات",
+    "description": "انقطاع مؤقت في الاتصال بالخدمة",
+    "suggested_fix": "إعادة المحاولة بعد لحظات",
     "is_transient": True,
     "confidence": 0.93,
 }
@@ -155,8 +155,8 @@ def test_valid_response_enriches_diagnosis(store, fake_anthropic):
 
     assert result is not None
     assert result.error_type is ErrorType.NETWORK_ERROR
-    assert result.description == VALID_VERDICT["description_ar"]
-    assert result.suggested_fix == VALID_VERDICT["suggested_fix_ar"]
+    assert result.description == VALID_VERDICT["description"]
+    assert result.suggested_fix == VALID_VERDICT["suggested_fix"]
     assert result.auto_fixable is True  # عابر + نوع يسمح بإعادة محاولة مسقوفة
     assert result.source == "llm"
     assert result.confidence == pytest.approx(0.93)
@@ -169,7 +169,7 @@ def test_request_shape_matches_contract(store, fake_anthropic):
     classifier.classify(job, regex_of(job))
 
     kwargs = client.calls[0]
-    assert kwargs["model"] == "claude-opus-5"
+    assert kwargs["model"] == "claude-opus-5-5"
     assert kwargs["max_tokens"] == 1024
     # معاملات أخذ العينات والتفكير الصريح ممنوعة على هذا الموديل
     for forbidden in ("temperature", "top_p", "top_k", "thinking"):
@@ -184,7 +184,7 @@ def test_request_shape_matches_contract(store, fake_anthropic):
     schema = fmt["schema"]
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == {
-        "error_type", "description_ar", "suggested_fix_ar", "is_transient", "confidence",
+        "error_type", "description", "suggested_fix", "is_transient", "confidence",
     }
     assert "unknown" in schema["properties"]["error_type"]["enum"]
 
@@ -333,3 +333,81 @@ def test_analyzer_use_llm_false_skips_classifier(store, fake_anthropic):
     analyzer = ErrorAnalyzer(llm_classifier=LLMClassifier(cache=store, client=client))
     analyzer.analyze(unknown_job(), use_llm=False)
     assert client.calls == []
+
+
+# ============================================================
+# توافق التوقيع مع SDK حقيقي (يعمل في job ai-extra في CI)
+# ============================================================
+
+
+def test_request_kwargs_match_installed_sdk_signature(store):
+    """كل وسيط نرسله يجب أن يقبله ``messages.create`` في النسخة المثبّتة فعلاً.
+
+    الحد الأدنى القديم ``anthropic>=0.40`` كان يسمح بنسخة لا تعرف ``output_config``
+    فيرفع create() ‏TypeError ويُسقط دورة المراقبة كاملة.
+    """
+    import inspect
+
+    anthropic = pytest.importorskip("anthropic")
+    from anthropic.resources.messages import Messages
+
+    client = StubClient(response=StubResponse(VALID_VERDICT))
+    job = unknown_job()
+    LLMClassifier(cache=store, client=client).classify(job, regex_of(job))
+
+    accepted = set(inspect.signature(Messages.create).parameters)
+    sent = set(client.calls[0])
+    assert sent <= accepted, f"وسائط لا تعرفها anthropic {anthropic.__version__}: {sorted(sent - accepted)}"
+
+
+def test_unexpected_sdk_error_falls_back_to_regex(store, fake_anthropic):
+    """استثناء خارج أصناف الـ API المعروفة لا يُسقط التصنيف — يقع على regex"""
+    client = StubClient(exception=TypeError("create() got an unexpected keyword argument 'output_config'"))
+    job = unknown_job()
+
+    assert LLMClassifier(cache=store, client=client).classify(job, regex_of(job)) is None
+
+
+def test_legacy_cached_verdict_with_ar_suffix_still_reads(store, fake_anthropic):
+    """أحكام مخزَّنة قبل 3.2 تحمل description_ar — لا تضيع بتغيير اسم الحقل"""
+    legacy = {k: v for k, v in VALID_VERDICT.items() if k not in ("description", "suggested_fix")}
+    legacy.update({"description_ar": "وصف قديم", "suggested_fix_ar": "حل قديم"})
+    job = unknown_job()
+    store.set_llm_verdict(cache_key(job.last_error), legacy)
+
+    result = LLMClassifier(cache=store, client=StubClient()).classify(job, regex_of(job))
+
+    assert result.description == "وصف قديم"
+    assert result.suggested_fix == "حل قديم"
+
+
+def test_english_requests_english_text_under_its_own_cache_key(store, fake_anthropic):
+    from cronmaster.i18n import set_lang
+
+    set_lang("en")
+    try:
+        client = StubClient(response=StubResponse(dict(VALID_VERDICT, description="Transient outage")))
+        job = unknown_job()
+        store.set_llm_verdict(cache_key(job.last_error), VALID_VERDICT)  # حكم عربي مخزَّن
+
+        result = LLMClassifier(cache=store, client=client).classify(job, regex_of(job))
+    finally:
+        set_lang("ar")
+
+    assert len(client.calls) == 1, "الحكم العربي المخزَّن لا يُعاد في الواجهة الإنجليزية"
+    assert "English" in client.calls[0]["messages"][0]["content"]
+    assert result.description == "Transient outage"
+
+
+def test_low_confidence_suffix_follows_language(store, fake_anthropic):
+    from cronmaster.i18n import set_lang
+
+    set_lang("en")
+    try:
+        client = StubClient(response=StubResponse(dict(VALID_VERDICT, confidence=0.3, description="Unsure")))
+        job = unknown_job()
+        result = LLMClassifier(cache=store, client=client).classify(job, regex_of(job))
+    finally:
+        set_lang("ar")
+
+    assert result.description == "Unsure (low confidence 0.30)"

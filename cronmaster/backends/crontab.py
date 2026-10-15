@@ -183,16 +183,26 @@ class SystemCrontabBackend(CronBackend):
         return self._rewrite(job_id, transform)
 
     def run_job(self, job_id: str) -> bool:
-        """تشغيل أمر المهمة مباشرة عبر الصدفة"""
+        """إطلاق أمر المهمة في الخلفية عبر الصدفة. True = أُطلق، لا "نجح".
+
+        الانتظار حتى انتهاء المهمة (حتى 300 ثانية لكل إعادة محاولة) كان يعلّق دورة
+        المراقبة دقائق. كما في cron نفسه: نُطلق ونمضي، ونتيجة التشغيل شأن الدورة التالية.
+        """
         for job in self.list_jobs():
             if job.id != job_id:
                 continue
             command = job.raw.get("command", "")
             try:
-                result = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, timeout=300)
-            except (OSError, subprocess.TimeoutExpired) as e:
+                subprocess.Popen(  # noqa: S603 — الأمر من crontab المستخدم نفسه
+                    ["/bin/sh", "-c", command],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as e:
                 raise CrontabError(f"تعذر تشغيل المهمة: {e}") from e
-            return result.returncode == 0
+            return True
         return False
 
     def set_timeout(self, job_id: str, seconds: int) -> bool:

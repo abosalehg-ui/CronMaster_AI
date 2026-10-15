@@ -43,11 +43,16 @@ class PolicyEngine:
         # رسائل تُضم إلى تنبيه الدورة (تحذيرات مبكرة، تعطيل، تراجع...)
         self.notices: List[str] = []
         self.critical: List[str] = []
+        # تنبيهات خاضعة للتهدئة تنتظر الإرسال: (المهمة، النوع). لا تُسجَّل في الحالة
+        # هنا بل بعد خروج الرسالة فعلاً — وإلا اختفى التحذير 24 ساعة دون أن يراه أحد
+        # إن فشلت القنوات أو شُغّل --no-alert أو كنا في فترة هدوء.
+        self.pending_alerts: List[Tuple[str, str]] = []
 
     def reset(self) -> None:
         """تفريغ الرسائل قبل دورة جديدة"""
         self.notices = []
         self.critical = []
+        self.pending_alerts = []
 
     def escalate(self, message: str, critical: bool = False) -> None:
         """إضافة سطر إلى تنبيه الدورة"""
@@ -132,7 +137,7 @@ class PolicyEngine:
             if dry_run or self.state.should_alert(job.id, "futile_fix"):
                 self.escalate(analysis.fix_details)
                 if not dry_run:
-                    self.state.record_alert(job.id, "futile_fix")
+                    self.pending_alerts.append((job.id, "futile_fix"))
             return 0, 0
 
         if dry_run:
@@ -221,7 +226,7 @@ class PolicyEngine:
         )
         self.escalate(message)
         if not dry_run:
-            self.state.record_alert(job.id, "duration_regression")
+            self.pending_alerts.append((job.id, "duration_regression"))
 
     def check_rollback(self, job: Job, analysis: FailureAnalysis, dry_run: bool) -> bool:
         """التراجع عن رفع المهلة إذا استمر الفشل بنفس السبب بعد عدة دورات"""
@@ -232,7 +237,9 @@ class PolicyEngine:
             return False
 
         if dry_run:
-            self.escalate(t("dry.rollback", name=job.name))
+            # المعاينة تطابق ما سيحدث فعلاً: الدورة الحقيقية ترفع العدّاد أولاً ثم تقارن
+            if int(pending.get("cycles", 0)) + 1 >= Config.ROLLBACK_AFTER_CYCLES:
+                self.escalate(t("dry.rollback", name=job.name))
             return False
 
         cycles = self.state.bump_rollback_cycle(job.id)

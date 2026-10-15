@@ -7,7 +7,7 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # أذونات مقيدة: مجلد العمل للمالك فقط، والملفات قد تحتوي حمولات مهام فيها أسرار
 DIR_MODE = 0o700
@@ -83,7 +83,7 @@ class Config:
 
     # المصنّف الاختياري بالذكاء الاصطناعي (Anthropic SDK)
     LLM_ENABLED = False
-    LLM_MODEL = "claude-opus-5"
+    LLM_MODEL = "claude-opus-5-5"
     LLM_MIN_CONFIDENCE = 0.8
     LLM_CACHE_DAYS = 30
 
@@ -238,7 +238,10 @@ class Config:
                 except ValueError:
                     logger.warning("قيمة غير رقمية في CRONMASTER_%s: %s", attr, env_value)
             elif attr in cls._BOOL_KEYS:
-                setattr(cls, attr, env_value.strip().lower() in ("1", "true", "yes"))
+                # متغيرات البيئة نصوص دائماً، فتُفسَّر هنا بالقاعدة نفسها التي تطبّقها
+                # validate() على الملف — وما لا يُفهم يُترك لـ validate فيُعامَل false
+                parsed = parse_bool(env_value)
+                setattr(cls, attr, env_value if parsed is None else parsed)
             elif attr in cls._LIST_KEYS or attr in cls._DICT_KEYS:
                 try:
                     setattr(cls, attr, json.loads(env_value))
@@ -297,6 +300,23 @@ class Config:
             setattr(cls, attr, replacement)
             cls.coerced_keys.append(attr.lower())
 
+        # المفاتيح المنطقية: "false" بين علامتي تنصيص نص غير فارغ، فكانت تُقرأ True
+        # وتُشغّل الخاصية التي حاول المستخدم إطفاءها — وبعضها يعدّل مهاماً حيّة
+        # (قاطع الدائرة، إعادة الجدولة، التراجع). ما لا يُفهم يُعامَل false: الخيار
+        # الآمن، لأن المفاتيح المنطقية الخطرة كلها معطّلة افتراضياً.
+        for attr in sorted(cls._BOOL_KEYS):
+            value = getattr(cls, attr)
+            if isinstance(value, bool):
+                continue
+            parsed = parse_bool(value)
+            if parsed is None:
+                logger.warning("قيمة %s غير مفهومة (%r) — اعتُبرت false", attr, value)
+                parsed = False
+            else:
+                logger.warning("قيمة %s يجب أن تكون true/false لا نصاً (%r) — فُهمت %r", attr, value, parsed)
+            setattr(cls, attr, parsed)
+            cls.coerced_keys.append(attr.lower())
+
         if not isinstance(cls.NOTIFIERS, list):
             logger.warning("notifiers يجب أن تكون قائمة — أُهملت")
             cls.NOTIFIERS = []
@@ -305,6 +325,27 @@ class Config:
             logger.warning("quiet_hours يجب أن تكون كائناً — أُهملت")
             cls.QUIET_HOURS = {}
             cls.coerced_keys.append("quiet_hours")
+
+
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off", ""})
+
+
+def parse_bool(value: Any) -> Optional[bool]:
+    """تفسير قيمة منطقية من ملف أو بيئة. يعيد None لما لا يُفهم."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if value is None:
+        return False
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE_WORDS:
+            return True
+        if text in _FALSE_WORDS:
+            return False
+    return None
 
 
 def _chmod_quiet(path: Path, mode: int) -> None:

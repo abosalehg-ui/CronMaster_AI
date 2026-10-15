@@ -212,11 +212,16 @@ class StateManager:
 
     # ---- تنبيهات فترة الهدوء ----
 
-    def queue_alert(self, message: str):
+    def queue_alert(self, message: str) -> bool:
+        """إضافة تنبيه للطابور. يعيد False إن كانت الرسالة نفسها مؤجلة أصلاً."""
         queue = self.state.setdefault("queued_alerts", [])
+        # طبقة حماية ثانية: الملخص الواحد لا يحمل الرسالة نفسها مرتين
+        if any(item.get("message") == message for item in queue):
+            return False
         queue.append({"message": message, "at": datetime.now().isoformat()})
         # سقف معقول حتى لا ينمو الملف بلا حدود لو طالت فترة الهدوء
         self.state["queued_alerts"] = queue[-50:]
+        return True
 
     def take_queued_alerts(self) -> List[dict]:
         """سحب التنبيهات المؤجلة وتفريغ الطابور"""
