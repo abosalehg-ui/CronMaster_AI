@@ -212,6 +212,22 @@ def _table(caption: str, head: str, body: str) -> str:
     )
 
 
+def _failures_table(analyses: List[FailureAnalysis]) -> str:
+    """جدول المهام الفاشلة — أهم جدول في التقرير، بالعناية نفسها التي لبقية الجداول:
+    ``scope`` لقارئ الشاشة، و``data-label`` لتخطيط البطاقات على الجوال، والتفاف للنصوص"""
+    headers = [t("html.col_job"), t("report.error"), t("report.analysis"), t("report.fix")]
+    body = []
+    for a in analyses:
+        cells = [
+            _cell(_e(a.job.name), headers[0], wrap=True),
+            _cell(_e(a.error_type.value), headers[1]),
+            _cell(_e(a.description), headers[2], wrap=True),
+            _cell(_e(a.fix_details or a.suggested_fix), headers[3], wrap=True),
+        ]
+        body.append(f"<tr>{''.join(cells)}</tr>")
+    return _table(t("html.failures_table"), _head(headers, wrap=[0, 2, 3]), "".join(body))
+
+
 def _jobs_table(jobs: List[Job], stats: List[Dict[str, Any]]) -> str:
     by_id = {s["job_id"]: s for s in stats}
     headers = [
@@ -293,20 +309,9 @@ def render_html(
 
     failures = ""
     if analyses:
-        items = "".join(
-            f"<tr><td>{_e(a.job.name)}</td><td>{_e(a.error_type.value)}</td>"
-            f"<td>{_e(a.description)}</td>"
-            f"<td>{_e(a.fix_details or a.suggested_fix)}</td></tr>"
-            for a in analyses
-        )
-        head = "".join(
-            f"<th>{_e(h)}</th>"
-            for h in (t("html.col_job"), t("report.error"), t("report.analysis"), t("report.fix"))
-        )
         failures = (
             f"<section><h2>{_e(t('report.failed_section'))} ({len(analyses)})</h2>"
-            f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{items}</tbody></table></div>'
-            "</section>"
+            f"{_failures_table(analyses)}</section>"
         )
 
     return f"""<!DOCTYPE html>

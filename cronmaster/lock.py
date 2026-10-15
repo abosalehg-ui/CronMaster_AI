@@ -3,6 +3,7 @@
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,9 @@ try:  # POSIX فقط
     import fcntl
 except ImportError:  # pragma: no cover — Windows
     fcntl = None
+
+#: الفاصل بين محاولات أخذ القفل حين يُطلب الانتظار
+POLL_SECONDS = 0.2
 
 
 def _pid_alive(pid: int) -> bool:
@@ -44,8 +48,23 @@ class ExecutionLock:
         self.acquired = False
         self._handle = None
 
-    def acquire(self) -> bool:
-        """محاولة أخذ القفل. False تعني أن نسخة أخرى تعمل الآن."""
+    def acquire(self, timeout: float = 0) -> bool:
+        """محاولة أخذ القفل. False تعني أن نسخة أخرى تعمل الآن.
+
+        ``timeout`` بالثواني: صفر (الافتراضي) يعني محاولة واحدة فورية — سلوك
+        ``monitor`` حين تتداخل الجدولة. الأوامر اليدوية مثل ``fix`` تنتظر قليلاً
+        بدل الرفض، لأن الدورة الجارية تنتهي عادةً خلال ثوانٍ.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            if self._try_acquire():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(POLL_SECONDS)
+
+    def _try_acquire(self) -> bool:
+        """محاولة واحدة بلا انتظار"""
         if self.acquired:
             return True
         self.path.parent.mkdir(parents=True, exist_ok=True)

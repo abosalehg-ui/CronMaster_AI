@@ -4,6 +4,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -19,80 +20,88 @@ from .lock import ExecutionLock
 from .reporting import FORMATS
 
 
+def _positive_int(value: str) -> int:
+    """نوع argparse: عدد صحيح موجب. ``[-0:]`` كان يعيد السجل كاملاً بدل لا شيء."""
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number <= 0:
+        raise argparse.ArgumentTypeError(t("cli.limit_positive", value=value))
+    return number
+
+
+def _early_lang(argv) -> str:
+    """لغة الواجهة قبل بناء المحلّل، حتى تتبعها نصوص ``--help`` نفسها.
+
+    المحلّل يُبنى قبل قراءة الإعدادات، فنكتفي بالعلم الصريح ثم متغير البيئة.
+    """
+    for index, arg in enumerate(argv):
+        if arg == "--lang" and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith("--lang="):
+            return arg.split("=", 1)[1]
+    return os.environ.get("CRONMASTER_LANG", "")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="CronMaster_AI - مدير ذكي لـ OpenClaw Cron Jobs",
+        description=t("help.description"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-أمثلة:
-  python CronMaster_AI.py monitor            # مراقبة وإصلاح تلقائي
-  python CronMaster_AI.py monitor --dry-run  # عرض ما سيحدث دون تنفيذ
-  python CronMaster_AI.py monitor --no-fix   # مراقبة بدون إصلاح
-  python CronMaster_AI.py status             # حالة سريعة
-  python CronMaster_AI.py report             # توليد تقرير
-  python CronMaster_AI.py report -f html     # تقرير HTML مكتفٍ بذاته
-  python CronMaster_AI.py list               # قائمة المهام
-  python CronMaster_AI.py fix <job_id>       # إصلاح مهمة محددة
-  python CronMaster_AI.py history            # سجل الإصلاحات
-  python CronMaster_AI.py stats              # إحصائيات من السجل التاريخي
-  python CronMaster_AI.py restore <job_id>   # استعادة مهمة من نسخة احتياطية
-  python CronMaster_AI.py doctor             # فحص ذاتي شامل
-
-أكواد خروج monitor: 0 سليم، 1 فشل المراقب، 2 مهام فاشلة، 3 طُبِّقت إصلاحات
-""",
+        epilog=t("help.epilog"),
     )
 
     parser.add_argument("--version", action="version", version=f"CronMaster_AI {__version__}")
-    parser.add_argument("--lang", choices=list(SUPPORTED_LANGS), help="لغة المخرجات (افتراضي ar)")
-    parser.add_argument("--backend", choices=sorted(BACKENDS), help="الواجهة الخلفية للمهام")
+    parser.add_argument("--lang", choices=list(SUPPORTED_LANGS), help=t("help.lang"))
+    parser.add_argument("--backend", choices=sorted(BACKENDS), help=t("help.backend"))
 
-    subparsers = parser.add_subparsers(dest="command", help="الأوامر")
+    subparsers = parser.add_subparsers(dest="command", help=t("help.commands"))
 
     # monitor
-    mon = subparsers.add_parser("monitor", help="مراقبة وإصلاح")
-    mon.add_argument("--no-fix", action="store_true", help="بدون إصلاح تلقائي")
-    mon.add_argument("--no-alert", action="store_true", help="بدون تنبيهات")
-    mon.add_argument("--no-retry", action="store_true", help="بدون إعادة تشغيل")
-    mon.add_argument("--dry-run", action="store_true", help="عرض ما سيحدث دون أي تنفيذ")
-    mon.add_argument("--prometheus-textfile", metavar="PATH", help="كتابة مقاييس Prometheus إلى ملف نصي")
-    mon.add_argument("--json", action="store_true", help="مخرجات JSON بدل العرض البشري")
+    mon = subparsers.add_parser("monitor", help=t("help.monitor"))
+    mon.add_argument("--no-fix", action="store_true", help=t("help.no_fix"))
+    mon.add_argument("--no-alert", action="store_true", help=t("help.no_alert"))
+    mon.add_argument("--no-retry", action="store_true", help=t("help.no_retry"))
+    mon.add_argument("--dry-run", action="store_true", help=t("help.dry_run"))
+    mon.add_argument("--prometheus-textfile", metavar="PATH", help=t("help.prometheus"))
+    mon.add_argument("--json", action="store_true", help=t("help.json"))
 
     # status
-    subparsers.add_parser("status", help="حالة سريعة")
+    subparsers.add_parser("status", help=t("help.status"))
 
     # report
-    rep = subparsers.add_parser("report", help="توليد تقرير")
-    rep.add_argument("--format", "-f", dest="fmt", choices=list(FORMATS), default="markdown")
+    rep = subparsers.add_parser("report", help=t("help.report"))
+    rep.add_argument("--format", "-f", dest="fmt", choices=list(FORMATS), default="markdown", help=t("help.format"))
 
     # list
-    jobs = subparsers.add_parser("list", help="قائمة المهام")
-    jobs.add_argument("--json", action="store_true", help="مخرجات JSON بدل العرض البشري")
+    jobs = subparsers.add_parser("list", help=t("help.list"))
+    jobs.add_argument("--json", action="store_true", help=t("help.json"))
 
     # fix
-    fix = subparsers.add_parser("fix", help="إصلاح مهمة")
-    fix.add_argument("job_id", help="معرف المهمة")
-    fix.add_argument("--no-retry", action="store_true", help="بدون إعادة تشغيل")
-    fix.add_argument("--json", action="store_true", help="مخرجات JSON بدل العرض البشري")
+    fix = subparsers.add_parser("fix", help=t("help.fix"))
+    fix.add_argument("job_id", help=t("help.job_id"))
+    fix.add_argument("--no-retry", action="store_true", help=t("help.no_retry"))
+    fix.add_argument("--json", action="store_true", help=t("help.json"))
 
     # history
-    hist = subparsers.add_parser("history", help="سجل الإصلاحات والتنبيهات")
-    hist.add_argument("--limit", type=int, default=20, help="عدد السجلات (افتراضي 20)")
-    hist.add_argument("--json", action="store_true", help="مخرجات JSON بدل العرض البشري")
+    hist = subparsers.add_parser("history", help=t("help.history"))
+    hist.add_argument("--limit", type=_positive_int, default=20, help=t("help.limit"))
+    hist.add_argument("--json", action="store_true", help=t("help.json"))
 
     # stats
-    stats = subparsers.add_parser("stats", help="إحصائيات من السجل التاريخي")
-    stats.add_argument("--job", dest="job", help="مهمة واحدة بدل كل المهام")
-    stats.add_argument("--days", type=int, help="نافذة الأيام (افتراضي مدة الاحتفاظ)")
+    stats = subparsers.add_parser("stats", help=t("help.stats"))
+    stats.add_argument("--job", dest="job", help=t("help.stats_job"))
+    stats.add_argument("--days", type=_positive_int, help=t("help.days"))
 
     # restore
-    restore = subparsers.add_parser("restore", help="استعادة مهمة من نسخة احتياطية")
-    restore.add_argument("job_id", help="معرف المهمة")
-    restore.add_argument("--backup", help="ملف نسخة احتياطية محدد (داخل مجلد النسخ)")
-    restore.add_argument("--list", dest="list_only", action="store_true", help="عرض النسخ المتاحة فقط")
-    restore.add_argument("--yes", "-y", action="store_true", help="بدون سؤال تأكيد")
+    restore = subparsers.add_parser("restore", help=t("help.restore"))
+    restore.add_argument("job_id", help=t("help.job_id"))
+    restore.add_argument("--backup", help=t("help.backup"))
+    restore.add_argument("--list", dest="list_only", action="store_true", help=t("help.list_only"))
+    restore.add_argument("--yes", "-y", action="store_true", help=t("help.yes"))
 
     # doctor
-    subparsers.add_parser("doctor", help="فحص ذاتي شامل")
+    subparsers.add_parser("doctor", help=t("help.doctor"))
 
     return parser
 
@@ -338,27 +347,49 @@ def _run_restore(master, args) -> int:
 
 
 def _run_monitor(master, args) -> int:
-    """تنفيذ المراقبة تحت قفل يمنع تشابك دورتين"""
-    lock = ExecutionLock()
-    if not lock.acquire():
-        # نسخة أخرى تعمل: هذا ليس خطأ، الجدولة تتداخل أحياناً
-        master.logger.info(t("lock.busy"))
-        print(t("lock.busy"))
-        return 0
-
-    try:
-        result = master.monitor(
-            auto_fix=not args.no_fix,
-            alert=not args.no_alert,
-            retry=not args.no_retry,
-            dry_run=args.dry_run,
-            prometheus_textfile=args.prometheus_textfile,
-        )
-    finally:
-        lock.release()
-
+    """تنفيذ دورة المراقبة (القفل يُؤخذ في ``main`` قبل تحميل الحالة)"""
+    result = master.monitor(
+        auto_fix=not args.no_fix,
+        alert=not args.no_alert,
+        retry=not args.no_retry,
+        dry_run=args.dry_run,
+        prometheus_textfile=args.prometheus_textfile,
+    )
     _emit(result, args, _print_monitor)
     return CronMaster.exit_code(result)
+
+
+#: أوامر تعدّل الحالة أو الواجهة الخلفية — لا تعمل اثنتان منها في وقت واحد
+_MUTATING_COMMANDS = ("monitor", "fix", "restore")
+#: كم تنتظر الأوامر اليدوية انتهاء دورة مراقبة جارية
+LOCK_WAIT_SECONDS = 30
+
+
+def _acquire_lock(args):
+    """أخذ قفل التنفيذ **قبل** بناء ``CronMaster``.
+
+    بناؤه يحمّل ``state.json``؛ أخذ القفل بعده كان يترك نافذة تُقرأ فيها حالة
+    ستُستبدل، و``fix``/``restore`` لم يأخذا قفلاً أصلاً، فكان من يحفظ أخيراً
+    يمحو تغييرات الآخر (عدّاد رفعات المهلة، أو إغلاق قاطع الدائرة).
+
+    يعيد (القفل، كود خروج أو None للمتابعة).
+    """
+    if args.command not in _MUTATING_COMMANDS or (args.command == "restore" and args.list_only):
+        return None, None
+
+    lock = ExecutionLock()
+    if args.command == "monitor":
+        if lock.acquire():
+            return lock, None
+        # نسخة أخرى تعمل: هذا ليس خطأ، الجدولة تتداخل أحياناً
+        logging.getLogger(__name__).info(t("lock.busy"))
+        print(t("lock.busy"))
+        return None, 0
+
+    if lock.acquire(timeout=LOCK_WAIT_SECONDS):
+        return lock, None
+    print(t("lock.timeout", seconds=LOCK_WAIT_SECONDS), file=sys.stderr)
+    return None, 1
 
 
 # ============================================================
@@ -367,6 +398,7 @@ def _run_monitor(master, args) -> int:
 
 
 def main():
+    set_lang(_early_lang(sys.argv[1:]))
     parser = build_arg_parser()
     args = parser.parse_args()
 
@@ -383,6 +415,18 @@ def main():
         Config.BACKEND = args.backend
     set_lang(args.lang or Config.LANG)
 
+    lock, early_exit = _acquire_lock(args)
+    if early_exit is not None:
+        sys.exit(early_exit)
+
+    try:
+        _dispatch(args)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _dispatch(args):
     master = CronMaster(dry_run=getattr(args, "dry_run", False))
 
     try:

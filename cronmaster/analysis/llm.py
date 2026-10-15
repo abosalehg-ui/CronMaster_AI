@@ -21,6 +21,7 @@ import re
 from typing import Any, Dict, Optional
 
 from ..config import Config
+from ..i18n import get_lang, t
 from ..models import ErrorType, FailureAnalysis, Job
 
 _VALID_TYPES = [e.value for e in ErrorType]
@@ -30,12 +31,12 @@ RESPONSE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
         "error_type": {"type": "string", "enum": _VALID_TYPES},
-        "description_ar": {"type": "string"},
-        "suggested_fix_ar": {"type": "string"},
+        "description": {"type": "string"},
+        "suggested_fix": {"type": "string"},
         "is_transient": {"type": "boolean"},
         "confidence": {"type": "number"},
     },
-    "required": ["error_type", "description_ar", "suggested_fix_ar", "is_transient", "confidence"],
+    "required": ["error_type", "description", "suggested_fix", "is_transient", "confidence"],
     "additionalProperties": False,
 }
 
@@ -44,7 +45,7 @@ RESPONSE_SCHEMA: Dict[str, Any] = {
 # الحد الأدنى للتخزين المؤقت على هذا الموديل 512 رمزاً؛ إن كان النص أقصر
 # فلن يُخزَّن — وهذا مقبول، ولا داعي لحشو النص.
 SYSTEM_PROMPT = """أنت مصنّف أخطاء لمهام مجدولة (cron jobs). مهمتك تصنيف نص خطأ واحد
-إلى أحد الأنواع المعروفة، وشرح السبب واقتراح حل — بالعربية.
+إلى أحد الأنواع المعروفة، وشرح السبب واقتراح حل — باللغة المطلوبة في الرسالة.
 
 تصنيفات الأخطاء المتاحة:
 - timeout: العملية تجاوزت المهلة الزمنية المسموحة للمهمة نفسها.
@@ -66,10 +67,13 @@ SYSTEM_PROMPT = """أنت مصنّف أخطاء لمهام مجدولة (cron jo
    دون أي تدخل بشري (انقطاع شبكة لحظي، ازدحام مؤقت). أي خطأ يحتاج تعديل كود أو
    صلاحيات أو بيئة هو false.
 4. confidence رقم بين 0 و 1 يعبّر عن ثقتك الفعلية. لا تبالغ.
-5. description_ar وsuggested_fix_ar جملتان قصيرتان بالعربية، محددتان وقابلتان للتنفيذ،
-   بلا حشو وبلا إعادة صياغة لنص الخطأ.
+5. description وsuggested_fix جملتان قصيرتان باللغة المطلوبة في الرسالة، محددتان
+   وقابلتان للتنفيذ، بلا حشو وبلا إعادة صياغة لنص الخطأ.
 6. لا تفترض أي صلاحية لتنفيذ إصلاح؛ أنت تشخّص فقط.
 """
+
+#: اسم لغة الإخراج كما يُكتب للنموذج
+_OUTPUT_LANGUAGE = {"ar": "العربية", "en": "English"}
 
 _ANNOUNCED = set()
 
@@ -207,13 +211,16 @@ class LLMClassifier:
             self.logger.info("[dry-run] لن يُستدعى المصنّف الذكي للمهمة %s", job.name)
             return None
 
-        key = cache_key(error_text)
+        lang = get_lang()
+        # الحكم المخزَّن يحمل نصاً بلغة معيّنة؛ مفتاح لكل لغة حتى لا يظهر حكم عربي
+        # في واجهة إنجليزية. العربية تحتفظ بالمفتاح القديم فلا تضيع الذاكرة القائمة.
+        key = cache_key(error_text) + ("" if lang == "ar" else f":{lang}")
 
         cached = self._read_cache(key)
         if cached is not None:
             return self._build(job, regex_analysis, cached, source="llm-cache")
 
-        verdict = self._ask(error_text, job)
+        verdict = self._ask(error_text, job, lang)
         if verdict is None:
             return None
 
@@ -237,7 +244,7 @@ class LLMClassifier:
         except Exception as e:  # noqa: BLE001
             self.logger.debug("تعذرت كتابة ذاكرة التصنيف: %s", e)
 
-    def _ask(self, error_text: str, job: Job) -> Optional[dict]:
+    def _ask(self, error_text: str, job: Job, lang: str = "ar") -> Optional[dict]:
         """نداء واحد للـ API مع سقوط آمن عند أي فشل."""
         client = self._get_client()
         if client is None:
@@ -252,6 +259,7 @@ class LLMClassifier:
         safe_text = redact(error_text)[:4000]
         user_text = (
             "صنّف الخطأ التالي لمهمة مجدولة.\n"
+            f"لغة description وsuggested_fix: {_OUTPUT_LANGUAGE.get(lang, _OUTPUT_LANGUAGE['ar'])}\n"
             f"اسم المهمة: {redact(job.name)}\n"
             f"جدولة المهمة: {job.schedule}\n"
             f"المهلة المضبوطة: {job.timeout_seconds if job.timeout_seconds is not None else 'غير محددة'}\n"
@@ -290,6 +298,11 @@ class LLMClassifier:
             return None
         except anthropic.APIConnectionError as e:
             self.logger.warning("تعذر الاتصال بـ Anthropic: %s — سيُكتفى بالتصنيف النمطي", e)
+            return None
+        except Exception as e:  # noqa: BLE001 — مكتبة اختيارية يجب ألا تُسقط دورة المراقبة
+            # مثلاً TypeError من نسخة SDK لا تعرف output_config: المصنّف تحسين لا شرط
+            self.logger.warning("فشل غير متوقع في المصنّف الذكي (%s: %s) — سيُكتفى بالتصنيف النمطي",
+                                type(e).__name__, e)
             return None
 
         # فحص الرفض قبل قراءة المحتوى: عند الرفض لا يوجد نص لنقرأه
@@ -332,18 +345,25 @@ class LLMClassifier:
     # ------------------------------------------------------------
 
     @staticmethod
+    def _text(verdict: dict, field: str) -> str:
+        """نص حقل من الحكم. الأحكام المخزَّنة قبل 3.2 تحمل الاسم القديم بلاحقة _ar."""
+        return verdict.get(field) or verdict.get(f"{field}_ar") or ""
+
+    @staticmethod
     def _build(job: Job, regex_analysis: FailureAnalysis, verdict: dict, source: str) -> FailureAnalysis:
         """تحويل حكم النموذج إلى FailureAnalysis مع كل قيود السلامة."""
         confidence = float(verdict.get("confidence", 0.0))
         error_type = ErrorType(verdict["error_type"])
+        description = LLMClassifier._text(verdict, "description")
+        suggested_fix = LLMClassifier._text(verdict, "suggested_fix")
 
         # ثقة منخفضة: نأخذ الوصف كإرشاد فقط ولا نغيّر التصنيف ولا نفتح أي مسار إصلاح
         if confidence < Config.LLM_MIN_CONFIDENCE:
             return FailureAnalysis(
                 job=job,
                 error_type=regex_analysis.error_type,
-                description=f"{verdict.get('description_ar', '')} (ثقة منخفضة {confidence:.2f})".strip(),
-                suggested_fix=verdict.get("suggested_fix_ar") or regex_analysis.suggested_fix,
+                description=f"{description} {t('llm.low_confidence', value=confidence)}".strip(),
+                suggested_fix=suggested_fix or regex_analysis.suggested_fix,
                 auto_fixable=False,
                 source=source,
                 confidence=confidence,
@@ -359,8 +379,8 @@ class LLMClassifier:
         return FailureAnalysis(
             job=job,
             error_type=error_type,
-            description=verdict.get("description_ar") or regex_analysis.description,
-            suggested_fix=verdict.get("suggested_fix_ar") or regex_analysis.suggested_fix,
+            description=description or regex_analysis.description,
+            suggested_fix=suggested_fix or regex_analysis.suggested_fix,
             auto_fixable=auto_fixable,
             source=source,
             confidence=confidence,

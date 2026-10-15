@@ -117,6 +117,11 @@ def in_quiet_hours(config: Optional[Dict[str, Any]] = None, now: Optional[dateti
 # مدير التنبيهات
 # ============================================================
 
+#: نتائج ``AlertManager.deliver``
+SENT = "sent"
+QUEUED = "queued"
+FAILED = "failed"
+
 
 class AlertManager:
     """إدارة التنبيهات: التوزيع على القنوات، فترة الهدوء، والتنسيق."""
@@ -154,17 +159,24 @@ class AlertManager:
                 self.logger.error("قناة %s رفعت استثناءً: %s", notifier.name, e)
         return sent
 
-    def send(self, message: str, critical: bool = False) -> bool:
-        """إرسال مع احترام فترة الهدوء.
+    def deliver(self, message: str, critical: bool = False) -> str:
+        """إرسال مع احترام فترة الهدوء. يعيد ``SENT`` أو ``QUEUED`` أو ``FAILED``.
 
         التنبيهات الحرجة (فشل المراقب نفسه، قاطع الدائرة) تخرج فوراً دائماً؛
         غير الحرجة تُخزَّن في الحالة وتُرسَل كملخص واحد في أول دورة خارج فترة الهدوء.
+
+        التأجيل ليس فشلاً: المستدعي يسجّل التهدئة عند ``QUEUED`` كما عند ``SENT``،
+        وإلا عادت كل دورة في فترة الهدوء تضيف النسخة نفسها إلى الطابور.
         """
         if not critical and self.state is not None and in_quiet_hours():
             self.state.queue_alert(message)
             self.logger.info("فترة هدوء — أُجّل التنبيه إلى ملخص لاحق")
-            return False
-        return self.dispatch(message)
+            return QUEUED
+        return SENT if self.dispatch(message) else FAILED
+
+    def send(self, message: str, critical: bool = False) -> bool:
+        """مثل ``deliver`` لكن يعيد True فقط إن خرجت الرسالة فعلاً الآن"""
+        return self.deliver(message, critical=critical) == SENT
 
     def flush_digest(self) -> bool:
         """إرسال التنبيهات المؤجلة كرسالة واحدة. يُستدعى في أول دورة خارج فترة الهدوء."""
@@ -233,6 +245,9 @@ class AlertManager:
 __all__ = [
     "AlertManager",
     "DiscordNotifier",
+    "FAILED",
+    "QUEUED",
+    "SENT",
     "NOTIFIER_TYPES",
     "Notifier",
     "NullNotifier",

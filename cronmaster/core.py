@@ -15,7 +15,7 @@ from .fixers import AutoFixer
 from .i18n import t
 from .metrics import ping_healthcheck, write_prometheus_textfile
 from .models import FailureAnalysis, Job
-from .notifiers import AlertManager, build_notifiers
+from .notifiers import FAILED, QUEUED, SENT, AlertManager, build_notifiers
 from .policies import PolicyEngine
 from .reporting import ReportGenerator
 from .storage import HistoryStore, StateManager
@@ -78,7 +78,7 @@ class CronMaster:
             # فشل المراقب نفسه حدث حرج — يُبلَّغ عنه صراحة ولا يُقدَّم كنجاح
             self.logger.error("تعذر جلب المهام: %s", e)
             if alert and not dry_run:
-                self.alerter.send(f"🚨 CronMaster لا يستطيع قراءة مهام OpenClaw:\n{e}", critical=True)
+                self.alerter.send(t("alert.backend_failed", backend=self.backend.name, error=e), critical=True)
             result = {"timestamp": datetime.now().isoformat(), "error": str(e)}
             self._publish_metrics(result, [], prometheus_textfile)
             return result
@@ -92,10 +92,18 @@ class CronMaster:
 
         for index, job in enumerate(failed_jobs, start=1):
             self.logger.info(t("monitor.progress", index=index, total=len(failed_jobs), name=job.name))
-            analysis = self.analyzer.analyze(job)
-            fixes, job_retries = self.policies.handle_failure(
-                job, analysis, auto_fix=auto_fix, retry=retry, dry_run=dry_run
-            )
+            # مهمة واحدة غريبة (أو مكتبة اختيارية معطوبة) يجب ألا تُطفئ المراقبة عن البقية:
+            # الحماية من BackendError وحدها كانت تترك أي استثناء آخر يُسقط الدورة كاملة
+            # فلا تُحفظ الحالة ولا يُرسل تنبيه ولا تُكتب المقاييس.
+            try:
+                analysis = self.analyzer.analyze(job)
+                fixes, job_retries = self.policies.handle_failure(
+                    job, analysis, auto_fix=auto_fix, retry=retry, dry_run=dry_run
+                )
+            except Exception as e:  # noqa: BLE001 — الحد الفاصل بين المهام
+                self.logger.exception("تعذرت معالجة المهمة %s", job.name)
+                self.policies.escalate(t("alert.job_crashed", name=job.name, error=e))
+                continue
             fixes_applied += fixes
             retries += job_retries
             analyses.append(analysis)
@@ -111,12 +119,15 @@ class CronMaster:
         recovered = [j for j in all_jobs if j.id in prev_failing - now_failing and j.last_status == "ok"]
 
         notices, critical = self.policies.notices, self.policies.critical
-        alert_sent = self._maybe_alert(analyses, recovered, silent_jobs, notices, critical, alert, dry_run)
+        outcome = self._maybe_alert(analyses, recovered, silent_jobs, notices, critical, alert, dry_run)
+        alert_sent = outcome == SENT
 
         if not dry_run:
-            self._persist_cycle(all_jobs, analyses, recovered, now_failing)
+            # الملخص قبل الحفظ: تفريغ الطابور تعديل على الحالة، والحفظ قبله كان يترك
+            # الطابور ممتلئاً على القرص فيُعاد إرسال الملخص نفسه في كل دورة تالية
             if alert and self.alerter.flush_digest():
                 alert_sent = True
+            self._persist_cycle(all_jobs, analyses, recovered, now_failing)
 
         result = {
             "timestamp": datetime.now().isoformat(),
@@ -129,6 +140,7 @@ class CronMaster:
             "fixes_applied": fixes_applied,
             "retries": retries,
             "alert_sent": alert_sent,
+            "alert_queued": outcome == QUEUED,
             "notices": list(notices + critical),
             "analyses": [a.to_dict() for a in analyses],
         }
@@ -154,9 +166,10 @@ class CronMaster:
         critical: List[str],
         alert: bool,
         dry_run: bool,
-    ) -> bool:
-        """اختيار ما يستحق التنبيه ثم إرساله. يعيد هل أُرسل فعلاً.
+    ) -> Optional[str]:
+        """اختيار ما يستحق التنبيه ثم إرساله.
 
+        يعيد ``SENT`` أو ``QUEUED`` أو ``FAILED``، أو None إن لم يكن هناك ما يُرسل.
         يستحق التنبيه: إصلاح مطبَّق، أو فشل بلغ العتبة ولم يُنبَّه عنه مؤخراً.
         """
         alert_analyses = [
@@ -171,21 +184,26 @@ class CronMaster:
         alert_silent = [j for j in silent_jobs if self.state.should_alert(j.id, "silent")]
 
         if not alert or not (alert_analyses or recovered or alert_silent or notices or critical):
-            return False
+            return None
 
         message = self.alerter.format_alert(alert_analyses, recovered, alert_silent, extra=notices + critical)
         if dry_run:
             self.logger.info(t("dry.alert_skipped", message=message))
-            return False
+            return None
 
-        if not self.alerter.send(message, critical=bool(critical)):
-            return False
+        outcome = self.alerter.deliver(message, critical=bool(critical))
+        if outcome == FAILED:
+            return FAILED
 
+        # التهدئة تُسجَّل لما خرج فعلاً أو أُجّل إلى الملخص — التأجيل وعد بالإرسال،
+        # وعدم تسجيله كان يجعل كل دورة في فترة الهدوء تضيف النسخة نفسها للطابور
         for a in alert_analyses:
             self.state.record_alert(a.job.id, a.error_type.value)
         for j in alert_silent:
             self.state.record_alert(j.id, "silent")
-        return True
+        for job_id, kind in self.policies.pending_alerts:
+            self.state.record_alert(job_id, kind)
+        return outcome
 
     def _persist_cycle(
         self,
@@ -372,7 +390,7 @@ class CronMaster:
         # 1) الواجهة الخلفية
         try:
             jobs = self.backend.list_jobs()
-            add(t("doctor.backend", name=self.backend.name), True, f"{len(jobs)} مهمة")
+            add(t("doctor.backend", name=self.backend.name), True, t("doctor.detail.jobs", count=len(jobs)))
         except BackendError as e:
             add(t("doctor.backend", name=self.backend.name), False, str(e))
 
@@ -386,7 +404,7 @@ class CronMaster:
             except (OSError, ValueError) as e:
                 add(t("doctor.config"), False, str(e))
         else:
-            add(t("doctor.config"), True, "غير موجود — ستُستخدم القيم الافتراضية", hard=False)
+            add(t("doctor.config"), True, t("doctor.detail.no_config"), hard=False)
 
         # 3) مفاتيح غير معروفة
         add(
@@ -427,19 +445,20 @@ class CronMaster:
             add(
                 t("doctor.notifiers"),
                 not invalid,
-                ", ".join(n.name for n in notifiers) + (f" (غير مضبوطة: {', '.join(invalid)})" if invalid else ""),
+                ", ".join(n.name for n in notifiers)
+                + (t("doctor.detail.invalid_notifiers", names=", ".join(invalid)) if invalid else ""),
                 hard=False,
             )
         else:
-            add(t("doctor.notifiers"), True, "لا توجد قنوات مضبوطة", hard=False)
+            add(t("doctor.notifiers"), True, t("doctor.detail.no_notifiers"), hard=False)
 
         # 7) المصنّف الذكي
         if Config.LLM_ENABLED:
             classifier = LLMClassifier(cache=self.history_store)
             ready = classifier._get_client() is not None  # noqa: SLF001 — فحص جاهزية مقصود
-            add(t("doctor.llm"), ready, Config.LLM_MODEL if ready else "غير جاهز (حزمة أو مفتاح ناقص)", hard=False)
+            add(t("doctor.llm"), ready, Config.LLM_MODEL if ready else t("doctor.detail.llm_not_ready"), hard=False)
         else:
-            add(t("doctor.llm"), True, "معطّل", hard=False)
+            add(t("doctor.llm"), True, t("doctor.detail.disabled"), hard=False)
 
         healthy = all(c["ok"] for c in checks if c["hard"])
         return {"ok": healthy, "checks": checks}

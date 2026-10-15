@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cronmaster-ai"
-version = "3.1.0"
+version = "3.2.0"
 description = "مدير ومراقب ذكي للمهام المجدولة مع إصلاح تلقائي وسجل تاريخي"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -13,7 +13,8 @@ dependencies = []
 
 [project.optional-dependencies]
 # مصنّف الأخطاء الاختياري — النواة تعمل بدونه بمكتبة Python القياسية فقط
-ai = ["anthropic>=0.40"]
+# 0.78 أول نسخة تقبل output_config بحقلَي format وeffort معاً (فُحص على wheels الحزمة)
+ai = ["anthropic>=0.78"]
 dev = ["pytest", "ruff"]
 
 [project.scripts]
